@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent terminals</title>
+<link rel="stylesheet" href="/xterm.css" />
+<style>
+  :root { color-scheme: dark; --bg:#111318; --panel:#181b22; --line:#272b35; --fg:#d8dee9; --dim:#7c8595; --accent:#7aa2f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:flex; background:var(--bg); color:var(--fg);
+         font:13px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif; }
+  aside { width:250px; flex:none; border-right:1px solid var(--line); background:var(--panel);
+          display:flex; flex-direction:column; }
+  aside h1 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+             margin:0; padding:14px 16px; border-bottom:1px solid var(--line); }
+  #list { overflow-y:auto; flex:1; }
+  .item { padding:10px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .item:hover { background:#1e222b; }
+  .item.active { background:#1e2430; box-shadow:inset 3px 0 0 var(--accent); }
+  .item .id { font-weight:600; }
+  .item .cmd { color:var(--dim); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+               font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#5ac27a; margin-right:6px; }
+  .dot.dead { background:#6b7280; }
+  main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); color:var(--dim);
+           display:flex; gap:12px; align-items:center; white-space:nowrap; }
+  header b { color:var(--fg); flex:none; }
+  header span { flex:none; }
+  header .path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  #term { flex:1; min-height:0; padding:8px 10px; }
+  .empty { margin:auto; color:var(--dim); }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Sessions</h1>
+  <div id="list"></div>
+</aside>
+<main>
+  <header id="head"><span class="empty">Pick a session</span></header>
+  <div id="term"></div>
+</main>
+
+<script src="/xterm.js"></script>
+<script>
+const listEl = document.getElementById('list');
+const headEl = document.getElementById('head');
+let term, ws, current = null;
+
+function fit() {
+  if (!term) return;
+  const el = document.getElementById('term');
+  // xterm's own cell metrics aren't exposed without the fit addon; measure a row instead.
+  const row = el.querySelector('.xterm-rows > div');
+  const cellH = row ? row.getBoundingClientRect().height : 17;
+  const cellW = row && row.firstChild ? row.getBoundingClientRect().width / Math.max(term.cols, 1) : 8;
+  const cols = Math.max(20, Math.floor((el.clientWidth - 20) / (cellW || 8)));
+  const rows = Math.max(5, Math.floor((el.clientHeight - 16) / (cellH || 17)));
+  if (cols !== term.cols || rows !== term.rows) {
+    term.resize(cols, rows);
+    send({ type: 'resize', cols, rows });
+  }
+}
+
+function send(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+
+function open(id) {
+  current = id;
+  if (ws) { ws.onclose = null; ws.close(); }
+  if (term) term.dispose();
+
+  term = new Terminal({ fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                        cursorBlink: true, scrollback: 5000,
+                        theme: { background: '#111318', foreground: '#d8dee9' } });
+  const el = document.getElementById('term');
+  el.innerHTML = '';
+  term.open(el);
+  term.onData(d => send({ type: 'input', data: d }));
+  term.focus();
+
+  ws = new WebSocket(`ws://${location.host}/?session=${encodeURIComponent(id)}`);
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'output') term.write(msg.data);
+    if (msg.type === 'info') {
+      headEl.innerHTML = `<b>${msg.info.id}</b><span>${msg.info.command}</span>` +
+        `<span class="path">${msg.info.cwd}</span><span>you can type here — the agent sees it too</span>`;
+      setTimeout(fit, 50);
+    }
+    if (msg.type === 'error') term.write(`\r\n${msg.message}\r\n`);
+  };
+  ws.onclose = () => term && term.write('\r\n[viewer disconnected]\r\n');
+  refresh();
+}
+
+async function refresh() {
+  const sessions = await (await fetch('/api/sessions')).json();
+  listEl.innerHTML = sessions.map(s => `
+    <div class="item ${s.id === current ? 'active' : ''}" data-id="${s.id}">
+      <div class="id"><span class="dot ${s.alive ? '' : 'dead'}"></span>${s.id}</div>
+      <div class="cmd">${s.command}</div>
+    </div>`).join('') || '<div class="item cmd">no sessions yet</div>';
+  for (const el of listEl.querySelectorAll('.item[data-id]')) {
+    el.onclick = () => open(el.dataset.id);
+  }
+  if (!current && sessions.length) open(sessions[0].id);
+}
+
+addEventListener('resize', fit);
+setInterval(refresh, 2000);
+const wanted = new URLSearchParams(location.search).get('session');
+if (wanted) open(wanted); else refresh();
+</script>
+</body>
+</html>

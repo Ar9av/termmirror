@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "termmirror": {
+      "command": "node",
+      "args": ["dist/src/index.js"]
+    }
+  }
+}
