@@ -3,3 +3,10 @@ dist/
 
 # local tooling state
 .prismor/
+
+# secrets
+.env
+.env.local
+.env.*.local
+*.tgz
+.npmrc

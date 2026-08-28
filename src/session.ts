@@ -59,13 +59,28 @@ export class Session {
     const rows = opts.rows ?? 40;
 
     this.term = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
-    this.proc = pty.spawn(this.command, this.args, {
-      name: "xterm-256color",
-      cols,
-      rows,
-      cwd: this.cwd,
-      env: { ...process.env, TERM: "xterm-256color", ...opts.env } as Record<string, string>,
-    });
+    try {
+      this.proc = pty.spawn(this.command, this.args, {
+        name: "xterm-256color",
+        cols,
+        rows,
+        cwd: this.cwd,
+        env: { ...process.env, TERM: "xterm-256color", ...opts.env } as Record<string, string>,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      // node-pty reports every spawn failure as this one opaque message, and by far the
+      // most common cause is its helper binary losing its executable bit during install.
+      if (reason.includes("posix_spawnp")) {
+        throw new Error(
+          `Could not start "${this.command}": ${reason}. This usually means node-pty's spawn-helper ` +
+            `is not executable — run "node scripts/fix-pty-permissions.mjs" (npm may have skipped it ` +
+            `if you installed with --ignore-scripts). Otherwise check that "${this.command}" exists ` +
+            `and that "${this.cwd}" is a readable directory.`,
+        );
+      }
+      throw err;
+    }
 
     // A real terminal answers the queries programs send it (cursor position, device
     // attributes, keyboard protocol). Without this the emulator stays mute and TUIs

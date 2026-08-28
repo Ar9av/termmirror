@@ -28,12 +28,13 @@
   "bin": {
     "termmirror": "dist/src/index.js"
   },
-  "files": ["dist", "public"],
+  "files": ["dist/src", "public", "scripts"],
   "scripts": {
     "build": "tsc",
     "start": "node dist/src/index.js",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper || true"
+    "postinstall": "node scripts/fix-pty-permissions.mjs",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
