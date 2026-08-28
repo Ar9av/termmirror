@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createRequire } from "node:module";
 import { z } from "zod";
 import { keyToSequence } from "./keys.js";
 import { exportRecording } from "./recording.js";
@@ -8,6 +9,9 @@ import { startWebUI, type WebUI } from "./web.js";
 const DEFAULT_IDLE_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// Read rather than duplicated, so the version a client sees cannot drift from the package.
+const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
+
 function text(value: unknown) {
   return {
     content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
@@ -16,7 +20,7 @@ function text(value: unknown) {
 
 export function createServer(manager: SessionManager, opts: { port?: number; noWeb?: boolean } = {}) {
   const server = new McpServer(
-    { name: "termmirror", version: "0.1.0" },
+    { name: "termmirror", version },
     {
       instructions:
         "Real interactive terminal sessions. The loop is always: send_input (or send_keys) -> " +
