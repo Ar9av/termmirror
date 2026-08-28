@@ -1,6 +1,7 @@
 import headless from "@xterm/headless";
 import pty from "node-pty";
 import { ensurePtyExecutable } from "./pty-permissions.js";
+import { Recorder, defaultCastPath, type RecordingResult } from "./recording.js";
 
 // Both packages are CommonJS; interop gives us the namespace on the default export.
 const { Terminal } = headless;
@@ -40,6 +41,7 @@ export class Session {
   private listeners = new Set<(chunk: string) => void>();
   private replay: string[] = [];
   private replayBytes = 0;
+  private recorder: Recorder | null = null;
 
   alive = true;
   exitCode: number | null = null;
@@ -104,6 +106,9 @@ export class Session {
       this.exitCode = exitCode;
       this.lastDataAt = Date.now();
       for (const l of this.listeners) l(`\r\n[process exited with code ${exitCode}]\r\n`);
+      // A recording must be finalized even if nobody calls stop_recording — otherwise the
+      // file is left open and truncated when the server goes away.
+      void this.stopRecording().catch(() => {});
     });
   }
 
@@ -136,6 +141,30 @@ export class Session {
   resize(cols: number, rows: number) {
     if (this.alive) this.proc.resize(cols, rows);
     this.term.resize(cols, rows);
+    this.recorder?.recordResize(cols, rows);
+  }
+
+  get recording() {
+    return this.recorder?.castPath ?? null;
+  }
+
+  /** Start capturing output to an asciicast file. */
+  startRecording(castPath?: string): string {
+    if (this.recorder) throw new Error(`Session ${this.id} is already recording to ${this.recorder.castPath}`);
+    this.recorder = new Recorder(
+      castPath ?? defaultCastPath(this.id),
+      { cols: this.cols, rows: this.rows, command: [this.command, ...this.args].join(" ") },
+      (listener) => this.onData(listener),
+    );
+    return this.recorder.castPath;
+  }
+
+  /** Finalize the recording. Returns null if this session was not recording. */
+  async stopRecording(): Promise<RecordingResult | null> {
+    const recorder = this.recorder;
+    if (!recorder) return null;
+    this.recorder = null;
+    return recorder.stop();
   }
 
   onData(listener: (chunk: string) => void) {
@@ -223,10 +252,14 @@ export class Session {
   }
 
   async kill() {
-    if (!this.alive) return;
+    if (!this.alive) {
+      await this.stopRecording();
+      return;
+    }
     this.proc.kill();
     for (let i = 0; i < 20 && this.alive; i++) await sleep(100);
     if (this.alive) this.proc.kill("SIGKILL");
+    await this.stopRecording();
   }
 
   info() {
@@ -240,6 +273,7 @@ export class Session {
       exitCode: this.exitCode,
       screen: this.alternateScreen ? "alternate" : "normal",
       startedAt: this.startedAt.toISOString(),
+      recording: this.recording,
     };
   }
 }

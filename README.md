@@ -32,6 +32,8 @@ file, entered insert mode, and typed a line.*
   page goes straight to the PTY, so a human can take over and hand back.
 - **Agent-to-agent.** Designed so one agent can drive another agent's CLI through a
   multi-turn conversation.
+- **Recordable.** Any session can be recorded in the background and exported as a GIF, an
+  mp4, or an asciicast, which makes demoing a terminal workflow a two-tool-call job.
 
 ## Requirements
 
@@ -86,6 +88,8 @@ responded and gone quiet, so you see the state *after* your keystroke.
 | `wait` | Waits for the session to respond and settle (`idle`), or for text to appear (`pattern`). |
 | `list_sessions` | Lists all sessions, alive or exited, with watch URLs. |
 | `resize` | Changes the terminal dimensions. |
+| `start_recording` | Begins capturing the session's output in the background. |
+| `stop_recording` | Finishes the recording and renders it to GIF, mp4, or asciicast. |
 | `kill_session` | Terminates a session. |
 
 ### Waiting
@@ -113,6 +117,35 @@ control back — no handoff protocol, just the same terminal from the other side
 | --- | --- |
 | `TERMINAL_UI_PORT` | Port for the web view (default `7878`; `0` picks a free port). |
 | `TERMINAL_NO_UI` | Set to `1` to disable the web view entirely. |
+
+## Recording a session
+
+`start_recording` captures everything the session prints from that point on, passively, while
+the agent keeps driving it as usual. `stop_recording` finishes the capture and renders it:
+
+```
+start_recording  →  (drive the session)  →  stop_recording
+```
+
+Recordings are written as [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
+(`.cast`) under `~/.termmirror/recordings/` unless a `path` is given. A `.cast` is a complete
+recording on its own — `asciinema play file.cast` replays it — and `stop_recording` renders it
+to a shareable file:
+
+| `format` | Output | Needs |
+| --- | --- | --- |
+| `gif` (default) | Animated GIF | [`agg`](https://github.com/asciinema/agg) |
+| `mp4` | H.264 video | `agg` and `ffmpeg` |
+| `cast` | The asciicast only | nothing |
+
+```bash
+brew install agg ffmpeg   # or: cargo install --git https://github.com/asciinema/agg
+```
+
+Neither binary ships with termmirror. Without them `stop_recording` still returns the `.cast`
+along with a note on how to install what was missing, so a recording is never lost to a
+missing renderer. Recordings are also finalized automatically when the process exits or the
+session is killed.
 
 ## Example
 
