@@ -3,6 +3,9 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 function textOf(res: any): string {
   return res.content.map((c: any) => c.text).join("\n");
@@ -60,6 +63,8 @@ test("drives a session end to end over the MCP protocol", async () => {
     "resize",
     "send_input",
     "send_keys",
+    "start_recording",
+    "stop_recording",
     "wait",
   ]);
 
@@ -81,6 +86,19 @@ test("drives a session end to end over the MCP protocol", async () => {
   await client.callTool({ name: "send_keys", arguments: { session, keys: ["ctrl+c"] } });
   const after = await client.callTool({ name: "wait", arguments: { session, idle_ms: 300, timeout: 5000 } });
   assert.equal(JSON.parse(textOf(after)).ok, true, "session should go quiet after the interrupt");
+
+  // Recording round trip: cast format needs no external renderer, so it works everywhere.
+  const castPath = path.join(os.tmpdir(), `termmirror-mcp-${process.pid}.cast`);
+  const started = JSON.parse(textOf(await client.callTool({ name: "start_recording", arguments: { session, path: castPath } })));
+  assert.equal(started.castPath, castPath);
+  await client.callTool({ name: "send_input", arguments: { session, text: "echo on-tape", enter: true } });
+  await client.callTool({ name: "wait", arguments: { session, idle_ms: 300, timeout: 5000 } });
+  const stopped = JSON.parse(
+    textOf(await client.callTool({ name: "stop_recording", arguments: { session, format: "cast" } })),
+  );
+  assert.equal(stopped.output, castPath);
+  assert.match(readFileSync(castPath, "utf8"), /on-tape/);
+  rmSync(castPath, { force: true });
 
   const listed = JSON.parse(textOf(await client.callTool({ name: "list_sessions", arguments: {} })));
   assert.equal(listed.sessions.length, 1);

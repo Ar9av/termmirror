@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { keyToSequence } from "./keys.js";
+import { exportRecording } from "./recording.js";
 import { SessionManager } from "./session.js";
 import { startWebUI, type WebUI } from "./web.js";
 
@@ -22,7 +23,9 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         "wait -> read_screen. read_screen returns a screenshot of the visible screen, not a log, " +
         "so read it after every wait. Use this for anything that blocks or prompts: another agent " +
         "CLI (claude, codex), REPLs, debuggers, ssh, installers, vim. A human can watch any session " +
-        "live in the browser at the URL create_session returns, and type into it alongside you.",
+        "live in the browser at the URL create_session returns, and type into it alongside you. " +
+        "start_recording captures everything a session prints from then on, in the background, and " +
+        "stop_recording writes it out as a GIF, mp4 or asciicast — use it to demo a workflow.",
     },
   );
 
@@ -201,6 +204,59 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       const s = manager.get(session);
       s.resize(cols, rows);
       return text({ ok: true, cols, rows });
+    },
+  );
+
+  server.registerTool(
+    "start_recording",
+    {
+      title: "Start recording a session",
+      description:
+        "Begin capturing everything the session prints. Recording runs in the background — keep " +
+        "driving the session normally — until stop_recording writes it out as a GIF, mp4 or " +
+        "asciicast. Start it before the part you want to show.",
+      inputSchema: {
+        session: z.string().describe("Session id."),
+        path: z
+          .string()
+          .optional()
+          .describe("Where to write the .cast file. Defaults to ~/.termmirror/recordings/."),
+      },
+    },
+    async ({ session, path: castPath }) => {
+      const s = manager.get(session);
+      return text({ recording: true, castPath: s.startRecording(castPath) });
+    },
+  );
+
+  server.registerTool(
+    "stop_recording",
+    {
+      title: "Stop recording and export",
+      description:
+        "Finish the recording and render it. Default format `gif` is the one to share; `mp4` is " +
+        "smaller for long sessions; `cast` skips rendering and leaves the asciicast, which replays " +
+        "with `asciinema play`. gif and mp4 need the `agg` binary (`brew install agg`), mp4 also " +
+        "needs ffmpeg — without them you still get the .cast back, plus how to install them.",
+      inputSchema: {
+        session: z.string().describe("Session id."),
+        format: z.enum(["gif", "mp4", "cast"]).optional().describe("Default 'gif'."),
+        output: z.string().optional().describe("Path for the rendered file. Defaults alongside the .cast."),
+      },
+    },
+    async ({ session, format, output }) => {
+      const s = manager.get(session);
+      const result = await s.stopRecording();
+      if (!result) throw new Error(`Session ${session} is not recording. Call start_recording first.`);
+
+      const fmt = format ?? "gif";
+      if (fmt === "cast") return text({ ...result, output: result.castPath });
+      try {
+        return text({ ...result, output: await exportRecording(result.castPath, fmt, output) });
+      } catch (err) {
+        // The cast is a complete recording on its own, so a missing renderer is a note, not a failure.
+        return text({ ...result, note: err instanceof Error ? err.message : String(err) });
+      }
     },
   );
 
