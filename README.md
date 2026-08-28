@@ -41,10 +41,19 @@ file, entered insert mode, and typed a line.*
 ## Installation
 
 ```bash
+npm install termmirror
+```
+
+Or from source:
+
+```bash
 git clone https://github.com/Ar9av/termmirror.git
 cd termmirror
 npm install && npm run build
 ```
+
+Install scripts are not required — termmirror repairs node-pty's helper permissions at
+runtime, so it works under `--ignore-scripts` and npm v12's scripts-off default.
 
 Register the server with Claude Code:
 

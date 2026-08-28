@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { createRequire } from "node:module";
+import { chmodSync, existsSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
 import { SessionManager } from "../src/session.js";
 import { keyToSequence } from "../src/keys.js";
 
@@ -89,6 +92,35 @@ test("exit is observed and further writes are refused", async () => {
   assert.equal(s.alive, false);
   assert.equal(s.exitCode, 3);
   assert.throws(() => s.write("x"), /has exited/);
+});
+
+test("spawning works even if the pty helper lost its executable bit", async () => {
+  // Reproduces an --ignore-scripts install, and npm v12's scripts-off default: strip the
+  // bit that node-pty's spawn-helper needs and confirm the session repairs it itself
+  // rather than failing with "posix_spawnp failed".
+  const require = createRequire(import.meta.url);
+  const root = path.resolve(path.dirname(require.resolve("node-pty")), "..");
+  const helpers = [
+    path.join(root, "build", "Release", "spawn-helper"),
+    ...(existsSync(path.join(root, "prebuilds"))
+      ? readdirSync(path.join(root, "prebuilds")).map((p) => path.join(root, "prebuilds", p, "spawn-helper"))
+      : []),
+  ].filter(existsSync);
+
+  assert.ok(helpers.length > 0, "expected at least one spawn-helper to test against");
+  const original = helpers.map((h) => [h, statSync(h).mode] as const);
+  for (const [h] of original) chmodSync(h, 0o644);
+
+  try {
+    const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile"] });
+    await s.waitIdle(300, 5000);
+    s.write("echo self-healed\r");
+    await s.waitIdle(300, 5000);
+    assert.match(await s.screen(), /self-healed/);
+    await mgr.remove(s.id);
+  } finally {
+    for (const [h, mode] of original) chmodSync(h, mode);
+  }
 });
 
 test("key names map to escape sequences", () => {

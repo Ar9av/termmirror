@@ -1,6 +1,6 @@
 {
   "name": "termmirror",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server giving AI agents real interactive terminal sessions — PTY, TUIs, REPLs, SSH, even another agent's CLI — with a live web view a human can watch and type into",
   "type": "module",
   "keywords": [
@@ -28,7 +28,11 @@
   "bin": {
     "termmirror": "dist/src/index.js"
   },
-  "files": ["dist/src", "public", "scripts"],
+  "files": [
+    "dist/src",
+    "public",
+    "scripts"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/src/index.js",

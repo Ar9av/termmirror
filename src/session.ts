@@ -1,5 +1,6 @@
 import headless from "@xterm/headless";
 import pty from "node-pty";
+import { ensurePtyExecutable } from "./pty-permissions.js";
 
 // Both packages are CommonJS; interop gives us the namespace on the default export.
 const { Terminal } = headless;
@@ -59,6 +60,7 @@ export class Session {
     const rows = opts.rows ?? 40;
 
     this.term = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
+    ensurePtyExecutable();
     try {
       this.proc = pty.spawn(this.command, this.args, {
         name: "xterm-256color",
@@ -73,10 +75,10 @@ export class Session {
       // most common cause is its helper binary losing its executable bit during install.
       if (reason.includes("posix_spawnp")) {
         throw new Error(
-          `Could not start "${this.command}": ${reason}. This usually means node-pty's spawn-helper ` +
-            `is not executable — run "node scripts/fix-pty-permissions.mjs" (npm may have skipped it ` +
-            `if you installed with --ignore-scripts). Otherwise check that "${this.command}" exists ` +
-            `and that "${this.cwd}" is a readable directory.`,
+          `Could not start "${this.command}": ${reason}. Check that "${this.command}" is installed and ` +
+            `on PATH, and that "${this.cwd}" is a readable directory. If node-pty's spawn-helper is not ` +
+            `executable and this install is read-only, "chmod +x" on it in node_modules/node-pty ` +
+            `restores it.`,
         );
       }
       throw err;
