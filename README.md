@@ -46,11 +46,6 @@ file, entered insert mode, and typed a line.*
 npm install termmirror
 ```
 
-On Linux the PTY binding is compiled at install time. If npm is configured with
-`ignore-scripts=true` it is skipped silently and the first session fails with
-`Failed to load native module: pty.node` — `npm rebuild node-pty --foreground-scripts`
-builds it (needs `make`, `g++` and `python3`).
-
 Or from source:
 
 ```bash
@@ -59,14 +54,25 @@ cd termmirror
 npm install && npm run build
 ```
 
-Install scripts are not required — termmirror repairs node-pty's helper permissions at
-runtime, so it works under `--ignore-scripts` and npm v12's scripts-off default.
+termmirror repairs node-pty's helper permissions at runtime, so `--ignore-scripts` costs
+nothing on macOS and Windows, where node-pty ships a prebuilt binding.
+
+On Linux there is no prebuilt binding — node-pty compiles one from its own install script.
+With `ignore-scripts=true` (npm v12's default, and a common hardening setting) that is
+skipped silently, and the first session fails with `Failed to load native module: pty.node`.
+Build it once with `npm rebuild node-pty --foreground-scripts`, which needs `make`, `g++`
+and `python3`.
 
 Register the server with Claude Code:
 
 ```bash
-claude mcp add termmirror -- node /absolute/path/to/termmirror/dist/src/index.js
+claude mcp add --scope user termmirror -- node /absolute/path/to/termmirror/dist/src/index.js
 ```
+
+`--scope user` matters: without it the server is registered for the current project only,
+and the tools are missing from every other one. The `.mcp.json` in this repo is the same
+kind of project-scoped registration — it serves the repo's own development, needs
+`npm run build` to have run, and Claude Code asks to approve it the first time.
 
 Any MCP client works; the server speaks stdio.
 
