@@ -6,6 +6,19 @@ import { once } from "node:events";
 
 export type Format = "cast" | "gif" | "mp4";
 
+export interface ExportOptions {
+  /**
+   * Cap pauses longer than this many seconds. A real session spends most of its time
+   * waiting — an agent turn, a build — and rendering that dead air at wall-clock speed
+   * makes a GIF nobody watches. Pass null to keep the original timing.
+   */
+  idleTimeLimit?: number | null;
+  /** Playback speed multiplier, e.g. 1.5 for half again as fast. */
+  speed?: number;
+}
+
+const DEFAULT_IDLE_TIME_LIMIT = 2;
+
 export interface RecordingResult {
   castPath: string;
   durationSeconds: number;
@@ -107,10 +120,25 @@ function run(cmd: string, args: string[], install: string): Promise<void> {
  * ffmpeg. Neither binary ships with this package, so a missing one throws a message the
  * caller surfaces alongside the .cast, which is always valid on its own.
  */
-export async function exportRecording(castPath: string, format: "gif" | "mp4", output?: string): Promise<string> {
+export async function exportRecording(
+  castPath: string,
+  format: "gif" | "mp4",
+  output?: string,
+  opts: ExportOptions = {},
+): Promise<string> {
+  if (typeof castPath !== "string" || castPath === "") {
+    throw new Error(
+      "exportRecording needs the path to a .cast file. stopRecording() returns it as `castPath` " +
+        `(got ${JSON.stringify(castPath)}).`,
+    );
+  }
   const base = castPath.replace(/\.cast$/, "");
   const gifPath = format === "gif" ? (output ?? `${base}.gif`) : `${base}.gif`;
-  await run("agg", [castPath, gifPath], "brew install agg");
+  const idle = opts.idleTimeLimit === undefined ? DEFAULT_IDLE_TIME_LIMIT : opts.idleTimeLimit;
+  const flags: string[] = [];
+  if (idle !== null) flags.push("--idle-time-limit", String(idle));
+  if (opts.speed) flags.push("--speed", String(opts.speed));
+  await run("agg", [...flags, castPath, gifPath], "brew install agg");
   if (format === "gif") return gifPath;
 
   const mp4Path = output ?? `${base}.mp4`;

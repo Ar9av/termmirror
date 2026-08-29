@@ -20,13 +20,15 @@ test("runs a command and reads it back off the screen", async () => {
 });
 
 test("wait holds for output that arrives late, not just for current quiet", async () => {
-  const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile"] });
-  // Echo off models the case that matters: a raw-mode TUI, where input produces no
-  // output of its own and the only thing to wait for is the program's reaction,
-  // which lands a second later. The session is already quiet when the wait starts.
-  s.write("stty -echo\r");
-  await s.waitIdle(300, 5000);
-  s.write("sleep 1; printf 'set%s\\n' tled\r");
+  // A raw-mode TUI is the case that matters: input draws nothing of its own and the only
+  // thing to wait for is a reaction that lands a second later. `stty -echo` under an
+  // interactive shell does not model that — readline turns echo back on at every prompt —
+  // so the shell execs into a reader with echo already off and never prompts again.
+  const s = mgr.create({
+    command: "/bin/bash",
+    args: ["--norc", "--noprofile", "-c", "stty -echo; read line; sleep 1; echo settled; read done"],
+  });
+  await s.type("go", true);
   const w = await s.waitIdle(300, 10000);
   assert.equal(w.reason, "idle");
   assert.match(await s.screen(), /settled/);
@@ -121,6 +123,20 @@ test("spawning works even if the pty helper lost its executable bit", async () =
   } finally {
     for (const [h, mode] of original) chmodSync(h, mode);
   }
+});
+
+test("type waits for a noisy program to go quiet before typing", async () => {
+  const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile"], cols: 80, rows: 24 });
+  await s.waitIdle(300, 5000);
+  s.write("for i in 1 2 3 4 5; do echo noise-$i; sleep 0.1; done; read answer && echo got:$answer\r");
+  await s.waitPattern("noise-1", 5000);
+
+  const start = Date.now();
+  await s.type("green", true);
+  // It must at least sit through one quiet period rather than typing straight into the burst.
+  assert.ok(Date.now() - start >= 200, "should have waited for quiet");
+  await s.waitIdle(400, 5000);
+  assert.match(await s.screen(), /got:green/);
 });
 
 test("key names map to escape sequences", () => {

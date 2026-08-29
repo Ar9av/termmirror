@@ -46,6 +46,11 @@ file, entered insert mode, and typed a line.*
 npm install termmirror
 ```
 
+On Linux the PTY binding is compiled at install time. If npm is configured with
+`ignore-scripts=true` it is skipped silently and the first session fails with
+`Failed to load native module: pty.node` — `npm rebuild node-pty --foreground-scripts`
+builds it (needs `make`, `g++` and `python3`).
+
 Or from source:
 
 ```bash
@@ -141,6 +146,11 @@ to a shareable file:
 ```bash
 brew install agg ffmpeg   # or: cargo install --git https://github.com/asciinema/agg
 ```
+
+Pauses longer than `idle_time_limit` seconds (default 2) are shortened in the render — a
+session spends most of its wall clock waiting on an agent turn or a build, and none of that
+is worth watching at real speed. Pass `idle_time_limit: null` to keep the original timing,
+and `speed` to scale the whole thing.
 
 Neither binary ships with termmirror. Without them `stop_recording` still returns the `.cast`
 along with a note on how to install what was missing, so a recording is never lost to a

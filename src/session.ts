@@ -138,6 +138,26 @@ export class Session {
     this.proc.write(data);
   }
 
+  /** Wait until the process has been quiet for `quietMs`, giving up after `maxMs`. */
+  async settle(quietMs: number, maxMs = 3000) {
+    const deadline = Date.now() + maxMs;
+    while (this.alive && Date.now() - this.lastDataAt < quietMs && Date.now() < deadline) {
+      await sleep(25);
+    }
+  }
+
+  /**
+   * Type text, waiting for the screen to be still first. A program that is redrawing —
+   * a TUI painting a frame, a shell that has not printed its first prompt yet — drops or
+   * misroutes keystrokes that land mid-redraw, and the loss is silent: the caller sees a
+   * successful write and an unchanged screen. This does not replace waiting for the
+   * program to be *ready*; that is what wait/waitPattern are for.
+   */
+  async type(text: string, enter = false, quietMs = 200) {
+    await this.settle(quietMs);
+    this.write(enter ? `${text}\r` : text);
+  }
+
   resize(cols: number, rows: number) {
     if (this.alive) this.proc.resize(cols, rows);
     this.term.resize(cols, rows);

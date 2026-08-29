@@ -28,11 +28,13 @@ await settle("startup");
 
 // A fresh directory means claude opens on its trust prompt; Enter accepts the default.
 if (/trust this folder/i.test(await session.screen())) {
-  session.write("\r");
+  await session.type("", true);
   await settle("after trusting the folder");
 }
 
-session.write(prompt + "\r");
+// type() rather than write(): it holds off until the composer stops redrawing, since keys
+// that arrive mid-redraw are dropped without a trace.
+await session.type(prompt, true);
 // It redraws constantly while thinking, so silence is the signal that the turn is over.
 await settle("after asking");
 

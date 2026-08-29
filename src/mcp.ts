@@ -78,7 +78,8 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
     {
       title: "Type into a session",
       description:
-        "Type text into the session, as a person would. Set `enter` to submit it. " +
+        "Type text into the session, as a person would. It waits for the screen to stop redrawing " +
+        "before typing, because keys that land mid-redraw are silently lost. Set `enter` to submit. " +
         "Follow with wait, then read_screen — the input alone tells you nothing about what happened.",
       inputSchema: {
         session: z.string().describe("Session id from create_session."),
@@ -88,7 +89,7 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
     },
     async ({ session, text: input, enter }) => {
       const s = manager.get(session);
-      s.write(enter ? `${input}\r` : input);
+      await s.type(input, !!enter);
       return text({ ok: true, sent: input, enter: !!enter });
     },
   );
@@ -241,14 +242,23 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         "Finish the recording and render it. Default format `gif` is the one to share; `mp4` is " +
         "smaller for long sessions; `cast` skips rendering and leaves the asciicast, which replays " +
         "with `asciinema play`. gif and mp4 need the `agg` binary (`brew install agg`), mp4 also " +
-        "needs ffmpeg — without them you still get the .cast back, plus how to install them.",
+        "needs ffmpeg — without them you still get the .cast back, plus how to install them. " +
+        "Pauses longer than `idle_time_limit` seconds are shortened in the render, so a long agent " +
+        "turn does not become a minute of a still frame.",
       inputSchema: {
         session: z.string().describe("Session id."),
         format: z.enum(["gif", "mp4", "cast"]).optional().describe("Default 'gif'."),
         output: z.string().optional().describe("Path for the rendered file. Defaults alongside the .cast."),
+        idle_time_limit: z
+          .number()
+          .positive()
+          .nullable()
+          .optional()
+          .describe("Cap pauses at this many seconds (default 2). Pass null to keep real timing."),
+        speed: z.number().positive().optional().describe("Playback speed multiplier, e.g. 1.5."),
       },
     },
-    async ({ session, format, output }) => {
+    async ({ session, format, output, idle_time_limit, speed }) => {
       const s = manager.get(session);
       const result = await s.stopRecording();
       if (!result) throw new Error(`Session ${session} is not recording. Call start_recording first.`);
@@ -256,7 +266,11 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       const fmt = format ?? "gif";
       if (fmt === "cast") return text({ ...result, output: result.castPath });
       try {
-        return text({ ...result, output: await exportRecording(result.castPath, fmt, output) });
+        const rendered = await exportRecording(result.castPath, fmt, output, {
+          idleTimeLimit: idle_time_limit,
+          speed,
+        });
+        return text({ ...result, output: rendered });
       } catch (err) {
         // The cast is a complete recording on its own, so a missing renderer is a note, not a failure.
         return text({ ...result, note: err instanceof Error ? err.message : String(err) });

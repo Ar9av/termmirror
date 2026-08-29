@@ -101,3 +101,11 @@ test("a missing renderer explains how to install it instead of failing silently"
     "should name the missing tool",
   );
 });
+
+test("exportRecording names the field it wanted instead of crashing on undefined", async () => {
+  await assert.rejects(
+    // The mistake this guards: reaching for `.path` on what stopRecording() returns.
+    () => exportRecording(undefined as unknown as string, "gif"),
+    /castPath/,
+  );
+});
