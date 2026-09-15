@@ -148,3 +148,44 @@ test("key names map to escape sequences", () => {
   assert.equal(keyToSequence("a"), "a");
   assert.throws(() => keyToSequence("wat"), /Unknown key/);
 });
+
+test("a pty that dies mid-reply does not wedge the emulator", async () => {
+  // The reply handler runs inside xterm's parser. A throw there escapes xterm's write
+  // loop, and that loop only reschedules itself when its queue is empty — which it is
+  // not — so every later chunk queues forever: a frozen screen on a session that still
+  // reports alive and still accepts input. Writing to an exited pty is that throw.
+  const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile"], cols: 80, rows: 24 });
+  await s.waitIdle(300, 5000);
+
+  // Force the handler to throw on every reply, whatever the pty's real state is.
+  (s as unknown as { proc: { write(d: string): void } }).proc.write = () => {
+    throw new Error("Cannot call write after the socket is closed");
+  };
+
+  // A device-attributes query makes the emulator answer, tripping the throw.
+  (s as unknown as { term: { write(d: string): void } }).term.write("\x1b[c");
+  await new Promise((r) => setTimeout(r, 100));
+
+  // The screen must still accept output afterwards.
+  (s as unknown as { term: { write(d: string): void } }).term.write("still-alive\r\n");
+  assert.match(await s.screen(), /still-alive/, "emulator wedged: later output never landed");
+  assert.equal(s.staleReason, null, "screen should not be reported stale");
+  await mgr.remove(s.id);
+});
+
+test("a wedged emulator reports the screen as stale instead of hanging", async () => {
+  const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile"], cols: 80, rows: 24 });
+  await s.waitIdle(300, 5000);
+
+  // Wedge it directly: swallow the flush callback the way a dead write loop does.
+  (s as unknown as { term: { write(d: string, cb?: () => void): void } }).term.write = () => {};
+
+  const started = Date.now();
+  const screen = await s.screen();
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 4000, `screen() should time out, took ${elapsed}ms`);
+  assert.equal(typeof screen, "string");
+  assert.match(String(s.staleReason), /frozen/, "the freeze must be reported, not hidden");
+  await mgr.remove(s.id);
+});

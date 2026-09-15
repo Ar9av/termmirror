@@ -42,6 +42,8 @@ export class Session {
   private replay: string[] = [];
   private replayBytes = 0;
   private recorder: Recorder | null = null;
+  /** Set when the emulator refuses or fails to apply output — see flush(). */
+  private emulatorError: string | null = null;
 
   alive = true;
   exitCode: number | null = null;
@@ -89,14 +91,32 @@ export class Session {
     // A real terminal answers the queries programs send it (cursor position, device
     // attributes, keyboard protocol). Without this the emulator stays mute and TUIs
     // that query on startup swallow the first keystroke waiting for a reply.
+    //
+    // This fires synchronously from inside the emulator's parser, so a throw here does
+    // not just lose one reply: it escapes xterm's write loop, and that loop only
+    // reschedules itself when its queue is empty — which it no longer is. Every later
+    // chunk then queues forever, leaving a frozen screen on a session that still reports
+    // alive and still accepts input. Writing to a pty that has exited is exactly the
+    // throw that triggers it, and `alive` lags the real exit by one event-loop turn.
     this.term.onData((reply) => {
-      if (this.alive) this.proc.write(reply);
+      if (!this.alive) return;
+      try {
+        this.proc.write(reply);
+      } catch {
+        /* the process is going away; its replies no longer matter */
+      }
     });
 
     this.proc.onData((chunk) => {
       this.lastDataAt = Date.now();
       this.outputCount++;
-      this.term.write(chunk);
+      // Same reasoning: never let the emulator take the rest of the pipeline down with
+      // it. Viewers and the recorder get the chunk whether or not the screen accepted it.
+      try {
+        this.term.write(chunk);
+      } catch (err) {
+        this.emulatorError = err instanceof Error ? err.message : String(err);
+      }
       this.pushReplay(chunk);
       for (const l of this.listeners) l(chunk);
     });
@@ -197,9 +217,36 @@ export class Session {
     return this.replay.join("");
   }
 
-  /** Wait for the emulator to finish applying queued writes before reading the screen. */
-  private flush() {
-    return new Promise<void>((resolve) => this.term.write("", () => resolve()));
+  /**
+   * Wait for the emulator to finish applying queued writes before reading the screen.
+   *
+   * Bounded, because the queue can wedge: if anything throws inside xterm's parser its
+   * write loop unwinds without rescheduling, and no later write restarts it. Waiting
+   * forever would hang read_screen — an agent's only observation channel — so instead we
+   * time out and say so. Returns false when output is stuck behind a dead queue, which
+   * means the screen below it is stale.
+   */
+  private flush(timeoutMs = 2000): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.emulatorError =
+          "the terminal emulator stopped applying output; the screen is frozen at the last " +
+          "state it accepted. Kill this session and create a new one.";
+        resolve(false);
+      }, timeoutMs);
+      this.term.write("", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }
+
+  /**
+   * Why the screen cannot be trusted right now, or null when it can. Callers surface this
+   * alongside the text rather than letting a frozen screen read as a real one.
+   */
+  get staleReason(): string | null {
+    return this.emulatorError;
   }
 
   /** The visible screen as plain text, trailing blank lines trimmed. */
@@ -294,6 +341,7 @@ export class Session {
       screen: this.alternateScreen ? "alternate" : "normal",
       startedAt: this.startedAt.toISOString(),
       recording: this.recording,
+      ...(this.emulatorError ? { stale: this.emulatorError } : {}),
     };
   }
 }

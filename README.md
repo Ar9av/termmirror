@@ -119,14 +119,15 @@ just typed.
 
 ## Watching a session
 
-The first session starts a local web server on port 7878. Open the URL returned by
+The first session starts a local web server on port 7878, or the next free port if something
+is already there — most often a termmirror that outlived its client. Open the URL returned by
 `create_session` to see the session live. Typing in the page writes directly to the PTY,
 which lets a human enter a password or answer a prompt the agent should not handle, then hand
 control back — no handoff protocol, just the same terminal from the other side.
 
 | Variable | Effect |
 | --- | --- |
-| `TERMINAL_UI_PORT` | Port for the web view (default `7878`; `0` picks a free port). |
+| `TERMINAL_UI_PORT` | Port for the web view. Set explicitly, a busy port is an error rather than a fallback; `0` picks a free port. |
 | `TERMINAL_NO_UI` | Set to `1` to disable the web view entirely. |
 
 ## Recording a session
@@ -157,6 +158,10 @@ Pauses longer than `idle_time_limit` seconds (default 2) are shortened in the re
 session spends most of its wall clock waiting on an agent turn or a build, and none of that
 is worth watching at real speed. Pass `idle_time_limit: null` to keep the original timing,
 and `speed` to scale the whole thing.
+
+`select` cuts a range instead, in seconds — `"40:"` from 40s on, `":90"` up to 90s, `"40:90"`
+between. Use it for a stretch that is busy but not worth watching: a spinner redrawing for a
+minute is never idle, so `idle_time_limit` will not touch it.
 
 Neither binary ships with termmirror. Without them `stop_recording` still returns the `.cast`
 along with a note on how to install what was missing, so a recording is never lost to a

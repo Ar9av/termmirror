@@ -1,7 +1,31 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createServer } from "./mcp.js";
-import { SessionManager } from "./session.js";
+
+// node-pty loads its native binding while the module is being evaluated, so this has to
+// be a dynamic import to be catchable at all. On Linux there is no prebuilt binding — it
+// is compiled at install time and skipped silently under `ignore-scripts=true` — and the
+// only thing the user sees is "Failed to load native module: pty.node" with no hint that
+// one rebuild fixes it.
+let createServer, SessionManager;
+try {
+  ({ createServer } = await import("./mcp.js"));
+  ({ SessionManager } = await import("./session.js"));
+} catch (err) {
+  const reason = err instanceof Error ? err.message : String(err);
+  if (/native module|pty\.node|Cannot find module.*pty/i.test(reason)) {
+    // stdout is the MCP channel; diagnostics belong on stderr, which is where the client
+    // shows a server that failed to start.
+    process.stderr.write(
+      `termmirror: node-pty's native binding is missing, so no terminal can be started.\n` +
+        `On Linux it is compiled during install and is skipped when npm runs with ` +
+        `ignore-scripts=true. Build it once with:\n\n` +
+        `  npm rebuild node-pty --foreground-scripts\n\n` +
+        `That needs make, g++ and python3. Original error: ${reason}\n`,
+    );
+    process.exit(1);
+  }
+  throw err;
+}
 
 const port = process.env.TERMINAL_UI_PORT ? Number(process.env.TERMINAL_UI_PORT) : undefined;
 const manager = new SessionManager();

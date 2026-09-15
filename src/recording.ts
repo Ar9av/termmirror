@@ -15,6 +15,18 @@ export interface ExportOptions {
   idleTimeLimit?: number | null;
   /** Playback speed multiplier, e.g. 1.5 for half again as fast. */
   speed?: number;
+  /**
+   * Render only part of the recording, as `agg`'s `--select` range in seconds:
+   * "40:" from 40s on, ":90" up to 90s, "40:90" between. `idleTimeLimit` cannot do this —
+   * a spinner redrawing for a minute is never idle — so cutting a range is the only way
+   * to drop a stretch that is busy but not worth watching.
+   *
+   * Windowing happens at render time on purpose. Trimming the .cast itself by dropping
+   * events corrupts a TUI stream: the emulator never sees the writes that built the
+   * current screen and the frame renders garbled. Only re-stamping timestamps is safe,
+   * and `agg` already does the right thing.
+   */
+  select?: string;
 }
 
 const DEFAULT_IDLE_TIME_LIMIT = 2;
@@ -138,6 +150,14 @@ export async function exportRecording(
   const flags: string[] = [];
   if (idle !== null) flags.push("--idle-time-limit", String(idle));
   if (opts.speed) flags.push("--speed", String(opts.speed));
+  if (opts.select) {
+    if (!/^(\d+(\.\d+)?)?:(\d+(\.\d+)?)?$/.test(opts.select) || opts.select === ":") {
+      throw new Error(
+        `select must be a range of seconds like "40:", ":90" or "40:90" (got ${JSON.stringify(opts.select)}).`,
+      );
+    }
+    flags.push("--select", opts.select);
+  }
   await run("agg", [...flags, castPath, gifPath], "brew install agg");
   if (format === "gif") return gifPath;
 
