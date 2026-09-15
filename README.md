@@ -32,6 +32,9 @@ file, entered insert mode, and typed a line.*
   page goes straight to the PTY, so a human can take over and hand back.
 - **Agent-to-agent.** Designed so one agent can drive another agent's CLI through a
   multi-turn conversation.
+- **Browser sessions too.** The same three properties for a real Chrome window: the agent
+  drives it by accessibility ref, a human watches and clicks in the web view, and the whole
+  thing records.
 - **Recordable.** Any session can be recorded in the background and exported as a GIF, an
   mp4, or an asciicast, which makes demoing a terminal workflow a two-tool-call job.
 
@@ -101,7 +104,13 @@ responded and gone quiet, so you see the state *after* your keystroke.
 | `resize` | Changes the terminal dimensions. |
 | `start_recording` | Begins capturing the session's output in the background. |
 | `stop_recording` | Finishes the recording and renders it to GIF, mp4, or asciicast. |
-| `kill_session` | Terminates a session. |
+| `browser_open` | Launches a Chrome window the agent drives, and returns a URL to watch it. |
+| `browser_navigate` | Loads a URL and returns the page snapshot. |
+| `browser_snapshot` | Returns the page as an accessibility tree with a `[ref=eN]` per element. |
+| `browser_act` | Clicks, types, presses, hovers, selects, scrolls or uploads, and returns the new snapshot. |
+| `browser_tabs` | Lists, switches, opens and closes tabs. |
+| `browser_wait` | Waits for the network to settle, or for text to appear on the page. |
+| `kill_session` | Terminates a session, terminal or browser. |
 
 ### Waiting
 
@@ -129,6 +138,55 @@ control back — no handoff protocol, just the same terminal from the other side
 | --- | --- |
 | `TERMINAL_UI_PORT` | Port for the web view. Set explicitly, a busy port is an error rather than a fallback; `0` picks a free port. |
 | `TERMINAL_NO_UI` | Set to `1` to disable the web view entirely. |
+
+## Browser sessions
+
+A browser is the same kind of session as a terminal, under its own tools:
+
+```
+browser_open  →  browser_act  →  (browser_act again)
+```
+
+`browser_act` returns the page snapshot it produced, so one call per step is usually enough.
+The snapshot is an accessibility tree rather than a picture:
+
+```
+- heading "Example Domain" [level=1] [ref=e2]
+- link "More information..." [ref=e4]
+```
+
+Every element carries a `[ref=eN]`, and `browser_act` targets those refs — or a CSS selector,
+if that is easier. This is what makes a click deterministic: no coordinates to guess and
+nothing for a vision model to misread. Pass `screenshot: true` to `browser_snapshot` when the
+layout itself is the question.
+
+A big page is cut at about 4k tokens, with a note saying how much was left out — a news front
+page is three times that in full and a Wikipedia article eight times, and every action returns
+a snapshot. `depth` shows the whole page in less detail; `full: true` returns all of it.
+
+termmirror drives the Google Chrome already installed on the machine and never downloads a
+browser of its own. The window is visible by default; pass `headless` on a server. Pass
+`profile` to reuse a named profile under `~/.termmirror/profiles`, which keeps logins between
+sessions — one session at a time per profile, since Chrome will not open a profile twice.
+
+A browser session appears in the web view like any other, as a live image of the page. Clicks,
+scrolls and keystrokes in that image go to the same page the agent is driving, so a human can
+solve a login or a CAPTCHA and hand straight back.
+
+### Tabs, dialogs, downloads and uploads
+
+A click that opens a new tab switches to it and returns that tab's snapshot, because that is
+invariably what the click was for and an agent left talking to the page underneath has no way
+to notice. `browser_tabs` goes back, opens another, or closes one; the snapshot says which tab
+it came from whenever more than one is open.
+
+A dialog freezes the page until it is answered, so the answer cannot be decided after the fact.
+Set `dialog` on the `browser_act` call that raises one, with `dialog_text` for a `prompt()`.
+Anything unanswered is dismissed, and the next snapshot reports what the dialog said and what
+was done with it.
+
+Downloads are saved under `~/.termmirror/downloads/<session>/` and named in the next snapshot.
+Uploads are `browser_act` with kind `upload` and a list of local `files`.
 
 ## Recording a session
 
@@ -163,6 +221,12 @@ and `speed` to scale the whole thing.
 between. Use it for a stretch that is busy but not worth watching: a spinner redrawing for a
 minute is never idle, so `idle_time_limit` will not touch it.
 
+A browser session records the same way, through the same two tools. It captures video rather
+than an event stream, so it writes a `.webm`, renders with `ffmpeg` alone, and ignores
+`idle_time_limit` and `select` — a video has no event timings to re-stamp. Recording also
+turns on Playwright's action overlay, so the video shows a cursor moving to each click and
+highlights what it hit, rather than a page that changes for no visible reason.
+
 Neither binary ships with termmirror. Without them `stop_recording` still returns the `.cast`
 along with a note on how to install what was missing, so a recording is never lost to a
 missing renderer. Recordings are also finalized automatically when the process exits or the
@@ -185,8 +249,9 @@ npm test         # build, then run the test suite
 ```
 
 The suite covers the wait semantics the rest of the server depends on, key encoding,
-scrollback, the web view's live stream and take-over typing, and an end-to-end run over the
-real MCP protocol.
+scrollback, the web view's live stream and take-over typing, browser snapshots, actions,
+frames and video, and an end-to-end run over the real MCP protocol. The browser tests skip
+themselves when Chrome is not installed.
 
 ## A note on the name
 

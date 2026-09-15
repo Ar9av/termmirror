@@ -56,6 +56,12 @@ test("drives a session end to end over the MCP protocol", async () => {
 
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(tools, [
+    "browser_act",
+    "browser_navigate",
+    "browser_open",
+    "browser_snapshot",
+    "browser_tabs",
+    "browser_wait",
     "create_session",
     "kill_session",
     "list_sessions",

@@ -2,8 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createRequire } from "node:module";
 import { z } from "zod";
 import { keyToSequence } from "./keys.js";
-import { exportRecording } from "./recording.js";
-import { SessionManager } from "./session.js";
+import { concatVideos, exportRecording, exportVideo } from "./recording.js";
+import type { Session, SessionManager } from "./session.js";
+import type { BrowserSession } from "./browser.js";
 import { startWebUI, type WebUI } from "./web.js";
 
 const DEFAULT_IDLE_MS = 2000;
@@ -29,7 +30,11 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         "CLI (claude, codex), REPLs, debuggers, ssh, installers, vim. A human can watch any session " +
         "live in the browser at the URL create_session returns, and type into it alongside you. " +
         "start_recording captures everything a session prints from then on, in the background, and " +
-        "stop_recording writes it out as a GIF, mp4 or asciicast — use it to demo a workflow.",
+        "stop_recording writes it out as a GIF, mp4 or asciicast — use it to demo a workflow. " +
+        "A web browser is the same kind of session under the browser_* tools: browser_open -> " +
+        "browser_act (which returns the new page) -> browser_wait when something is still loading. " +
+        "Click and type by the [ref=eN] in the page snapshot, never by guessing coordinates. Browser " +
+        "sessions watch, take over and record exactly like terminals do.",
     },
   );
 
@@ -220,20 +225,23 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
     {
       title: "Start recording a session",
       description:
-        "Begin capturing everything the session prints. Recording runs in the background — keep " +
-        "driving the session normally — until stop_recording writes it out as a GIF, mp4 or " +
-        "asciicast. Start it before the part you want to show.",
+        "Begin capturing the session. Recording runs in the background — keep driving the session " +
+        "normally — until stop_recording writes it out as a GIF, mp4 or asciicast. Works on a " +
+        "browser session too, where it captures the page as video and draws the cursor and a " +
+        "highlight on everything you click. Start it before the part you want to show.",
       inputSchema: {
-        session: z.string().describe("Session id."),
+        session: z.string().describe("Session id, terminal or browser."),
         path: z
           .string()
           .optional()
-          .describe("Where to write the .cast file. Defaults to ~/.termmirror/recordings/."),
+          .describe("Where to write the raw recording: .cast for a terminal, .webm for a browser. Defaults to ~/.termmirror/recordings/."),
       },
     },
     async ({ session, path: castPath }) => {
-      const s = manager.get(session);
-      return text({ recording: true, castPath: s.startRecording(castPath) });
+      const s = manager.any(session);
+      // A browser's start is async and throws if the screencast could not open.
+      const file = await s.startRecording(castPath);
+      return text({ recording: true, [s.info().kind === "browser" ? "videoPath" : "castPath"]: file });
     },
   );
 
@@ -247,10 +255,12 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         "with `asciinema play`. gif and mp4 need the `agg` binary (`brew install agg`), mp4 also " +
         "needs ffmpeg — without them you still get the .cast back, plus how to install them. " +
         "Pauses longer than `idle_time_limit` seconds are shortened in the render, so a long agent " +
-        "turn does not become a minute of a still frame.",
+        "turn does not become a minute of a still frame. A browser session records to .webm and " +
+        "renders with ffmpeg alone; `idle_time_limit` and `select` do not apply to it, because a " +
+        "video has no event stream to re-time.",
       inputSchema: {
-        session: z.string().describe("Session id."),
-        format: z.enum(["gif", "mp4", "cast"]).optional().describe("Default 'gif'."),
+        session: z.string().describe("Session id, terminal or browser."),
+        format: z.enum(["gif", "mp4", "cast"]).optional().describe("Default 'gif'. 'cast' is terminal-only."),
         output: z.string().optional().describe("Path for the rendered file. Defaults alongside the .cast."),
         idle_time_limit: z
           .number()
@@ -270,8 +280,32 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       },
     },
     async ({ session, format, output, idle_time_limit, speed, select }) => {
-      const s = manager.get(session);
-      const result = await s.stopRecording();
+      const s = manager.any(session);
+      if (s.info().kind === "browser") {
+        const done = await (s as BrowserSession).stopRecording();
+        if (!done) throw new Error(`Session ${session} is not recording. Call start_recording first.`);
+        const fmt = format ?? "gif";
+        const skipped = [idle_time_limit !== undefined && "idle_time_limit", select && "select"].filter(Boolean);
+        const note = skipped.length ? { note: `${skipped.join(" and ")} only applies to terminal recordings — ignored.` } : {};
+        if (fmt === "cast") {
+          return text({
+            ...done,
+            output: done.videoPath,
+            note: "a browser records to video, not an asciicast — this is the raw .webm.",
+          });
+        }
+        try {
+          // Following the page across tabs splits the recording into one file per tab; they
+          // have to be one video again before anything is rendered from them.
+          const source = await concatVideos(done.segments);
+          return text({ ...done, ...note, output: await exportVideo(source, fmt, output, { speed }) });
+        } catch (err) {
+          // The .webm plays on its own, so a missing ffmpeg is a note rather than a failure.
+          return text({ ...done, output: done.videoPath, note: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      const result = await (s as Session).stopRecording();
       if (!result) throw new Error(`Session ${session} is not recording. Call start_recording first.`);
 
       const fmt = format ?? "gif";
@@ -287,6 +321,192 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         // The cast is a complete recording on its own, so a missing renderer is a note, not a failure.
         return text({ ...result, note: err instanceof Error ? err.message : String(err) });
       }
+    },
+  );
+
+  server.registerTool(
+    "browser_open",
+    {
+      title: "Open a browser session",
+      description:
+        "Launch a real Chrome window the agent drives and a human can watch — the browser " +
+        "equivalent of create_session. Returns the session id, a URL where a human can watch and " +
+        "click alongside you, and the page snapshot if you passed a url. Headed by default, so " +
+        "the window is visible on the machine; pass headless for a server. Pass `profile` to reuse " +
+        "a named on-disk Chrome profile, which keeps logins between sessions.",
+      inputSchema: {
+        url: z.string().optional().describe("Page to open first. Bare hosts get https://."),
+        headless: z.boolean().optional().describe("Run with no visible window (default false)."),
+        width: z.number().int().min(320).max(3840).optional().describe("Viewport width (default 1280)."),
+        height: z.number().int().min(240).max(2160).optional().describe("Viewport height (default 800)."),
+        profile: z
+          .string()
+          .optional()
+          .describe("Named persistent profile, kept under ~/.termmirror/profiles. Only one session per profile at a time."),
+      },
+    },
+    async ({ url, headless, width, height, profile }) => {
+      const session = await manager.createBrowser({ url, headless, width, height, profile });
+      await ensureWeb();
+      return text({
+        ...session.info(),
+        watchUrl: web ? web.sessionUrl(session.id) : webError,
+        ...(url ? { snapshot: await session.snapshot() } : { next: "Call browser_navigate to load a page." }),
+      });
+    },
+  );
+
+  server.registerTool(
+    "browser_navigate",
+    {
+      title: "Go to a URL",
+      description: "Load a page in a browser session and return its snapshot once the DOM is ready.",
+      inputSchema: {
+        session: z.string().describe("Browser session id from browser_open."),
+        url: z.string().describe("Where to go. Bare hosts get https://."),
+      },
+    },
+    async ({ session, url }) => {
+      const b = manager.getBrowser(session);
+      await b.navigate(url);
+      return text(await b.snapshot());
+    },
+  );
+
+  server.registerTool(
+    "browser_snapshot",
+    {
+      title: "Read the page",
+      description:
+        "Return the page as an accessibility tree: every element with its role, its text, and a " +
+        "`[ref=eN]` handle. Those refs are what browser_act targets — they are stable and exact, " +
+        "where guessed coordinates are not. Set `screenshot` when the layout itself is the question; " +
+        "the tree alone answers what is on the page and what can be clicked. Big pages are cut at " +
+        "about 4k tokens with a note saying so — pass `depth` to see the whole page in less detail, " +
+        "or `full` to get all of it.",
+      inputSchema: {
+        session: z.string().describe("Browser session id."),
+        depth: z.number().int().min(1).optional().describe("Limit how deep the tree goes, for a large page."),
+        full: z.boolean().optional().describe("Return the whole tree however large (default: cut at ~4k tokens)."),
+        screenshot: z.boolean().optional().describe("Also return a JPEG of the viewport (default false)."),
+      },
+    },
+    async ({ session, depth, full, screenshot }) => {
+      const b = manager.getBrowser(session);
+      const tree = await b.snapshot(depth, full);
+      if (!screenshot) return text(tree);
+      return {
+        content: [
+          { type: "text" as const, text: tree },
+          { type: "image" as const, data: await b.screenshot(), mimeType: "image/jpeg" },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "browser_act",
+    {
+      title: "Act on the page",
+      description:
+        "Do one thing to the page and get the resulting snapshot back, so this is usually the only " +
+        "call you need per step. `target` is a `[ref=eN]` from the last snapshot, or a CSS selector. " +
+        "Kinds: click; type (fills a field, set `enter` to submit); press (a key, with no target it " +
+        "goes to the page); hover; select (choose `text` in a dropdown); scroll (a target scrolls it " +
+        "into view, no target scrolls the page by `amount` pixels); upload (attach `files` to a file " +
+        "input). Refs go stale when the page changes — always act on the refs from the snapshot " +
+        "you just read. If this action pops up an alert, confirm or prompt, set `dialog` to say how " +
+        "to answer it: a dialog freezes the page until it is answered, so the decision cannot wait " +
+        "until afterwards, and an unanswered one is dismissed. A click that opens a new tab switches " +
+        "to that tab, and the snapshot you get back is the new one.",
+      inputSchema: {
+        session: z.string().describe("Browser session id."),
+        kind: z.enum(["click", "type", "press", "hover", "select", "scroll", "upload"]).describe("What to do."),
+        target: z.string().optional().describe('A ref like "e12", or a CSS selector.'),
+        text: z.string().optional().describe("Text to type, or the option to select."),
+        key: z.string().optional().describe('Key for `press`, e.g. "Enter", "Escape", "ArrowDown", "Control+a".'),
+        amount: z.number().optional().describe("Pixels to scroll. Negative scrolls up."),
+        enter: z.boolean().optional().describe("Press Enter after typing (default false)."),
+        files: z.array(z.string()).min(1).optional().describe("Local file paths for `upload`."),
+        dialog: z
+          .enum(["accept", "dismiss"])
+          .optional()
+          .describe("How to answer an alert, confirm or prompt this action raises (default dismiss)."),
+        dialog_text: z.string().optional().describe("Answer to type into a prompt() that is being accepted."),
+        settle_ms: z.number().int().min(0).optional().describe("Pause before snapshotting, for animations (default 250)."),
+      },
+    },
+    async ({ session, kind, target, text: value, key, amount, enter, files, dialog, dialog_text, settle_ms }) => {
+      const b = manager.getBrowser(session);
+      await b.act({ kind, target, text: value, key, amount, enter, files, dialog, dialogText: dialog_text });
+      // A click that starts a navigation or a transition leaves the tree mid-change; a short
+      // pause makes the snapshot describe the page the action produced.
+      await new Promise((r) => setTimeout(r, settle_ms ?? 250));
+      return text(await b.snapshot());
+    },
+  );
+
+  server.registerTool(
+    "browser_tabs",
+    {
+      title: "List or switch tabs",
+      description:
+        "Work with the session's tabs. A click that opens a new tab already switches to it, so " +
+        "reach for this when you need to go back to the one you came from, open a second tab " +
+        "yourself, or close one you are done with. `list` is also how you find out what a popup " +
+        "was. `select` and `new` return the snapshot of the tab you land on.",
+      inputSchema: {
+        session: z.string().describe("Browser session id."),
+        action: z.enum(["list", "select", "new", "close"]).optional().describe("Default 'list'."),
+        index: z.number().int().min(0).optional().describe("Which tab, for select and close. From `list`."),
+        url: z.string().optional().describe("Page to open in the new tab, for `new`."),
+      },
+    },
+    async ({ session, action, index, url }) => {
+      const b = manager.getBrowser(session);
+      const which = action ?? "list";
+      if (which === "list") return text({ tabs: await b.tabList() });
+
+      if (which === "new") {
+        await b.newTab(url);
+        return text(await b.snapshot());
+      }
+      if (index === undefined) throw new Error(`action '${which}' requires \`index\` — call action 'list' to see them.`);
+      if (which === "close") {
+        await b.closeTab(index);
+        return text({ ok: true, closed: index, tabs: await b.tabList() });
+      }
+      await b.selectTab(index);
+      return text(await b.snapshot());
+    },
+  );
+
+  server.registerTool(
+    "browser_wait",
+    {
+      title: "Wait for the page",
+      description:
+        "Block until the page is ready. Mode `idle` (the default) waits for network activity to " +
+        "stop — right after a navigation or a form submit. Mode `pattern` waits for text to appear " +
+        "anywhere in the page's visible text, which is the one to use when you know what should " +
+        "show up. browser_act already pauses briefly, so reach for this only when something is " +
+        "genuinely slow.",
+      inputSchema: {
+        session: z.string().describe("Browser session id."),
+        mode: z.enum(["idle", "pattern"]).optional().describe("Default 'idle'."),
+        pattern: z.string().optional().describe("Regex to find in the page text, required for mode 'pattern'."),
+        ignore_case: z.boolean().optional().describe("Case-insensitive pattern match."),
+        timeout: z.number().int().min(100).optional().describe(`Give up after this many ms (default ${DEFAULT_TIMEOUT_MS}).`),
+      },
+    },
+    async ({ session, mode, pattern, ignore_case, timeout }) => {
+      const b = manager.getBrowser(session);
+      const timeoutMs = timeout ?? DEFAULT_TIMEOUT_MS;
+      if ((mode ?? "idle") === "pattern") {
+        if (!pattern) throw new Error("mode 'pattern' requires `pattern`.");
+        return text(await b.waitPattern(pattern, timeoutMs, ignore_case));
+      }
+      return text(await b.waitIdle(timeoutMs));
     },
   );
 

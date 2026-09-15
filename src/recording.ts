@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
+import { createWriteStream, mkdirSync, rmSync, writeFileSync, type WriteStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -169,4 +169,55 @@ export async function exportRecording(
     "brew install ffmpeg",
   );
   return mp4Path;
+}
+
+/**
+ * Join the segments a recording was split into when it followed the page from tab to tab.
+ * Every segment came from the same encoder at the same viewport, so they concatenate without
+ * re-encoding. Returns the single file to render from.
+ */
+export async function concatVideos(segments: string[]): Promise<string> {
+  if (segments.length < 2) return segments[0];
+  const joined = segments[0].replace(/\.webm$/, "") + "-joined.webm";
+  const list = joined.replace(/\.webm$/, ".txt");
+  // The concat demuxer reads paths from a file; single quotes are its escape for them.
+  writeFileSync(list, segments.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n") + "\n");
+  try {
+    await run("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", joined], "brew install ffmpeg");
+    return joined;
+  } finally {
+    rmSync(list, { force: true });
+  }
+}
+
+/**
+ * Render a browser recording. A browser session records to .webm directly — there is no
+ * asciicast for a page of pixels — so the conversion is ffmpeg alone, with no `agg` step.
+ * `idleTimeLimit` and `select` have no equivalent here: a video has no event stream to
+ * re-stamp, so trimming dead air would mean re-encoding by content rather than by timing.
+ */
+export async function exportVideo(
+  videoPath: string,
+  format: "gif" | "mp4",
+  output?: string,
+  opts: { speed?: number } = {},
+): Promise<string> {
+  const base = videoPath.replace(/\.webm$/, "");
+  const target = output ?? `${base}.${format}`;
+  const speed = opts.speed && opts.speed > 0 ? `setpts=PTS/${opts.speed},` : "";
+
+  const filters =
+    format === "gif"
+      ? // A palette pass; without it a screenshot of a web page dithers into mush.
+        `${speed}fps=12,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse`
+      : `${speed}scale=trunc(iw/2)*2:trunc(ih/2)*2`;
+
+  // The gif chain splits the stream for the palette, so it needs filter_complex; mp4 is a
+  // plain chain and -vf is what ffmpeg expects for that.
+  const args = ["-y", "-i", videoPath, format === "gif" ? "-filter_complex" : "-vf", filters];
+  if (format === "mp4") args.push("-movflags", "faststart", "-pix_fmt", "yuv420p");
+  args.push(target);
+
+  await run("ffmpeg", args, "brew install ffmpeg");
+  return target;
 }

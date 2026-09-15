@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
-import type { SessionManager } from "./session.js";
+import type { Session, SessionManager } from "./session.js";
+import type { BrowserSession } from "./browser.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
@@ -71,17 +72,38 @@ export async function startWebUI(manager: SessionManager, port?: number, host = 
     const id = new URL(req.url ?? "/", "http://localhost").searchParams.get("session");
     let session;
     try {
-      session = manager.get(id ?? "");
+      session = manager.any(id ?? "");
     } catch (err) {
       ws.send(JSON.stringify({ type: "error", message: String(err) }));
       ws.close();
       return;
     }
 
-    ws.send(JSON.stringify({ type: "info", info: session.info() }));
-    ws.send(JSON.stringify({ type: "output", data: session.replayBuffer() }));
+    if (session.info().kind === "browser") {
+      const browser = session as BrowserSession;
+      ws.send(JSON.stringify({ type: "info", info: browser.info() }));
+      // A browser mirrors as JPEG frames rather than a byte stream, and whatever the human
+      // clicks or types goes to the same page the agent is driving — no arbitration, exactly
+      // as typing into a terminal session works.
+      const stop = browser.onFrame((data) => {
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "frame", data }));
+      });
+      ws.on("message", (raw) => {
+        try {
+          void browser.input(JSON.parse(raw.toString()));
+        } catch {
+          /* ignore malformed frames */
+        }
+      });
+      ws.on("close", stop);
+      return;
+    }
 
-    const off = session.onData((chunk) => {
+    const term = session as Session;
+    ws.send(JSON.stringify({ type: "info", info: term.info() }));
+    ws.send(JSON.stringify({ type: "output", data: term.replayBuffer() }));
+
+    const off = term.onData((chunk) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "output", data: chunk }));
     });
 
@@ -89,8 +111,8 @@ export async function startWebUI(manager: SessionManager, port?: number, host = 
     ws.on("message", (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
-        if (msg.type === "input" && session.alive && !isTerminalReply(msg.data)) session.write(msg.data);
-        if (msg.type === "resize") session.resize(msg.cols, msg.rows);
+        if (msg.type === "input" && term.alive && !isTerminalReply(msg.data)) term.write(msg.data);
+        if (msg.type === "resize") term.resize(msg.cols, msg.rows);
       } catch {
         /* ignore malformed frames */
       }

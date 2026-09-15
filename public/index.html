@@ -29,6 +29,9 @@
   header span { flex:none; }
   header .path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
   #term { flex:1; min-height:0; padding:8px 10px; }
+  #term.browser { padding:0; display:flex; background:#0b0d11; }
+  #screen { margin:auto; max-width:100%; max-height:100%; display:block; cursor:default;
+            outline:none; image-rendering:auto; }
   .empty { margin:auto; color:var(--dim); }
 </style>
 </head>
@@ -46,7 +49,7 @@
 <script>
 const listEl = document.getElementById('list');
 const headEl = document.getElementById('head');
-let term, ws, current = null;
+let term, ws, current = null, screen = null;
 
 function fit() {
   if (!term) return;
@@ -65,10 +68,55 @@ function fit() {
 
 function send(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 
+// A browser session mirrors as JPEG frames in an <img>; clicks and keys go back to the same
+// page the agent is driving, the way typing into a terminal session does.
+function openBrowser(id) {
+  const el = document.getElementById('term');
+  el.className = 'browser';
+  el.innerHTML = '<img id="screen" tabindex="0" alt="live browser view" />';
+  screen = document.getElementById('screen');
+  screen.focus();
+
+  // Two scalings sit between a click here and the page: the frame comes back smaller than the
+  // viewport it was captured from, and it is then drawn at whatever size fits this panel.
+  // So the page sends a position as a fraction of the image and lets the server, which knows
+  // the viewport, turn it back into pixels — this side cannot pick the wrong basis.
+  const at = e => {
+    const r = screen.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+  };
+  screen.onclick = e => { screen.focus(); send({ type: 'click', ...at(e) }); };
+  screen.onwheel = e => { e.preventDefault(); send({ type: 'wheel', ...at(e), dy: e.deltaY }); };
+  screen.onkeydown = e => {
+    e.preventDefault();
+    // A bare printable character is inserted as text; everything else is a named key press,
+    // and the DOM's names are already the ones Playwright expects.
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) send({ type: 'text', text: e.key });
+    else send({ type: 'key', key: [e.ctrlKey && 'Control', e.altKey && 'Alt', e.metaKey && 'Meta',
+                                   e.shiftKey && e.key.length > 1 && 'Shift', e.key].filter(Boolean).join('+') });
+  };
+
+  ws = new WebSocket(`ws://${location.host}/?session=${encodeURIComponent(id)}`);
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'frame') screen.src = 'data:image/jpeg;base64,' + msg.data;
+    if (msg.type === 'info') {
+      headEl.innerHTML = `<b>${msg.info.id}</b><span>browser</span>` +
+        `<span class="path">${msg.info.url || ''}</span>` +
+        `<span>you can click and type here — the agent sees it too</span>`;
+    }
+    if (msg.type === 'error') headEl.innerHTML = `<span class="empty">${msg.message}</span>`;
+  };
+  refresh();
+}
+
 function open(id) {
   current = id;
   if (ws) { ws.onclose = null; ws.close(); }
-  if (term) term.dispose();
+  if (term) { term.dispose(); term = null; }
+  screen = null;
+  if (id.startsWith('web-')) return openBrowser(id);
+  document.getElementById('term').className = '';
 
   term = new Terminal({ fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                         cursorBlink: true, scrollback: 5000,
@@ -107,7 +155,7 @@ async function refresh() {
   if (!current && sessions.length) open(sessions[0].id);
 }
 
-addEventListener('resize', fit);
+addEventListener('resize', () => { if (term) fit(); });
 setInterval(refresh, 2000);
 const wanted = new URLSearchParams(location.search).get('session');
 if (wanted) open(wanted); else refresh();

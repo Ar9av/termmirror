@@ -2,6 +2,7 @@ import headless from "@xterm/headless";
 import pty from "node-pty";
 import { ensurePtyExecutable } from "./pty-permissions.js";
 import { Recorder, defaultCastPath, type RecordingResult } from "./recording.js";
+import type { BrowserOptions, BrowserSession } from "./browser.js";
 
 // Both packages are CommonJS; interop gives us the namespace on the default export.
 const { Terminal } = headless;
@@ -332,6 +333,7 @@ export class Session {
   info() {
     return {
       id: this.id,
+      kind: "terminal" as const,
       command: [this.command, ...this.args].join(" "),
       cwd: this.cwd,
       cols: this.cols,
@@ -348,7 +350,9 @@ export class Session {
 
 export class SessionManager {
   private sessions = new Map<string, Session>();
+  private browsers = new Map<string, BrowserSession>();
   private counter = 0;
+  private browserCounter = 0;
 
   create(opts: SessionOptions = {}): Session {
     const id = `term-${++this.counter}`;
@@ -357,28 +361,62 @@ export class SessionManager {
     return session;
   }
 
+  async createBrowser(opts: BrowserOptions = {}): Promise<BrowserSession> {
+    const id = `web-${++this.browserCounter}`;
+    // Loaded on demand: playwright is a large module and most sessions are terminals.
+    const { BrowserSession } = await import("./browser.js");
+    const session = await BrowserSession.launch(id, opts);
+    this.browsers.set(id, session);
+    return session;
+  }
+
+  private missing(id: string): Error {
+    const known = [...this.sessions.keys(), ...this.browsers.keys()].join(", ") || "none";
+    return new Error(`No session "${id}". Existing sessions: ${known}`);
+  }
+
   get(id: string): Session {
     const s = this.sessions.get(id);
     if (!s) {
-      const known = [...this.sessions.keys()].join(", ") || "none";
-      throw new Error(`No session "${id}". Existing sessions: ${known}`);
+      // A browser id here is a tool being pointed at the wrong kind of session, which is
+      // worth saying out loud rather than reporting as a session that does not exist.
+      if (this.browsers.has(id)) throw new Error(`"${id}" is a browser session — use the browser_* tools for it.`);
+      throw this.missing(id);
     }
     return s;
   }
 
-  list(): Session[] {
-    return [...this.sessions.values()];
+  getBrowser(id: string): BrowserSession {
+    const s = this.browsers.get(id);
+    if (!s) {
+      if (this.sessions.has(id)) throw new Error(`"${id}" is a terminal session — the browser_* tools do not apply to it.`);
+      throw this.missing(id);
+    }
+    return s;
+  }
+
+  /** Either kind, for the tools that treat them the same: recording, listing, killing. */
+  any(id: string): Session | BrowserSession {
+    const s = this.sessions.get(id) ?? this.browsers.get(id);
+    if (!s) throw this.missing(id);
+    return s;
+  }
+
+  list(): Array<Session | BrowserSession> {
+    return [...this.sessions.values(), ...this.browsers.values()];
   }
 
   async remove(id: string) {
-    const s = this.get(id);
+    const s = this.any(id);
     await s.kill();
     this.sessions.delete(id);
+    this.browsers.delete(id);
   }
 
   async killAll() {
     await Promise.all(this.list().map((s) => s.kill()));
     this.sessions.clear();
+    this.browsers.clear();
   }
 }
 
