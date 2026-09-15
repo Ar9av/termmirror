@@ -32,7 +32,15 @@ export interface WebUI {
   close(): Promise<void>;
 }
 
-export async function startWebUI(manager: SessionManager, port = 7878, host = "127.0.0.1"): Promise<WebUI> {
+const DEFAULT_PORT = 7878;
+
+export async function startWebUI(manager: SessionManager, port?: number, host = "127.0.0.1"): Promise<WebUI> {
+  // An explicit port is a request to be somewhere specific, so a collision there is an
+  // error. The default is just a convention, and the thing most likely to be sitting on
+  // it is another termmirror that outlived its client — no reason to lose the viewer
+  // over that when any free port serves the page just as well.
+  const wanted = port ?? DEFAULT_PORT;
+  const strict = port !== undefined;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const key = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -55,6 +63,10 @@ export async function startWebUI(manager: SessionManager, port = 7878, host = "1
   });
 
   const wss = new WebSocketServer({ server });
+  // ws mirrors the http server's errors onto itself, and an unhandled 'error' event is
+  // fatal to the whole process — a busy port would take the MCP server down with it
+  // before the listen below ever got to handle the failure itself.
+  wss.on("error", () => {});
   wss.on("connection", (ws: WebSocket, req) => {
     const id = new URL(req.url ?? "/", "http://localhost").searchParams.get("session");
     let session;
@@ -86,13 +98,34 @@ export async function startWebUI(manager: SessionManager, port = 7878, host = "1
     ws.on("close", off);
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, host, () => resolve());
-  });
+  const bind = (p: number) =>
+    new Promise<void>((resolve, reject) => {
+      const onError = (err: NodeJS.ErrnoException) => reject(err);
+      server.once("error", onError);
+      server.listen(p, host, () => {
+        server.removeListener("error", onError);
+        resolve();
+      });
+    });
+
+  try {
+    await bind(wanted);
+  } catch (err) {
+    const busy = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
+    if (!busy || strict) {
+      if (busy) {
+        throw new Error(
+          `port ${wanted} is already in use. If you did not set TERMINAL_UI_PORT, a termmirror ` +
+            `from an earlier session may still be holding it — check with \`lsof -ti :${wanted}\`.`,
+        );
+      }
+      throw err;
+    }
+    await bind(0);
+  }
 
   const addr = server.address();
-  const boundPort = typeof addr === "object" && addr ? addr.port : port;
+  const boundPort = typeof addr === "object" && addr ? addr.port : wanted;
   const url = `http://${host}:${boundPort}`;
 
   return {

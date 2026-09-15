@@ -141,7 +141,10 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
           ? `[${s.id}: full-screen app active]`
           : `[${s.id}]`
         : `[${s.id}: exited with code ${s.exitCode}]`;
-      return text(`${header}\n${body}`);
+      // A frozen screen otherwise reads as a real one: everything still says alive, and
+      // the agent keeps acting on a snapshot that stopped updating. Say it out loud.
+      const stale = s.staleReason ? `\n[${s.id}: STALE — ${s.staleReason}]` : "";
+      return text(`${header}${stale}\n${body}`);
     },
   );
 
@@ -256,9 +259,17 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
           .optional()
           .describe("Cap pauses at this many seconds (default 2). Pass null to keep real timing."),
         speed: z.number().positive().optional().describe("Playback speed multiplier, e.g. 1.5."),
+        select: z
+          .string()
+          .optional()
+          .describe(
+            'Render only part of the recording, in seconds: "40:" from 40s on, ":90" up to 90s, ' +
+              '"40:90" between. Use this to cut a stretch that is busy but not worth watching — a ' +
+              "spinner redrawing for a minute is never idle, so idle_time_limit will not touch it.",
+          ),
       },
     },
-    async ({ session, format, output, idle_time_limit, speed }) => {
+    async ({ session, format, output, idle_time_limit, speed, select }) => {
       const s = manager.get(session);
       const result = await s.stopRecording();
       if (!result) throw new Error(`Session ${session} is not recording. Call start_recording first.`);
@@ -269,6 +280,7 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         const rendered = await exportRecording(result.castPath, fmt, output, {
           idleTimeLimit: idle_time_limit,
           speed,
+          select,
         });
         return text({ ...result, output: rendered });
       } catch (err) {
