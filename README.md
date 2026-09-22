@@ -98,7 +98,7 @@ responded and gone quiet, so you see the state *after* your keystroke.
 | `create_session` | Starts a session (`$SHELL` by default, or any command) and returns its id plus a URL to watch it. |
 | `send_input` | Types text into a session, optionally submitting it with Enter. |
 | `send_keys` | Sends `ctrl+c`, `escape`, `tab`, arrow keys, `f1`–`f12`, `alt+X`, and similar. |
-| `read_screen` | Returns the visible screen as plain text; `scrollback` reaches into history. |
+| `read_screen` | Returns the visible screen as plain text; `scrollback` reaches into history, `attrs` marks highlighted (reverse-video) text so a TUI's selected row is visible. |
 | `wait` | Waits for the session to respond and settle (`idle`), or for text to appear (`pattern`). |
 | `list_sessions` | Lists all sessions, alive or exited, with watch URLs. |
 | `resize` | Changes the terminal dimensions. |

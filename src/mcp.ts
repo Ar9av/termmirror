@@ -126,7 +126,8 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       description:
         "Return what is on the session's screen right now, as plain text. This is a screenshot: it " +
         "shows the current screen, so output that scrolled away is gone — pass `scrollback` to reach " +
-        "back into history instead.",
+        "back into history instead. Pass `attrs` when a TUI marks its selection with highlighting " +
+        "rather than a glyph — without it every row reads the same.",
       inputSchema: {
         session: z.string().describe("Session id."),
         tail: z.number().int().min(1).optional().describe("Only the last N rows of the visible screen."),
@@ -136,11 +137,18 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
           .min(1)
           .optional()
           .describe("Last N lines of history including what scrolled off. Ignores `tail`."),
+        attrs: z
+          .boolean()
+          .optional()
+          .describe(
+            "Mark reverse-video (highlighted) text with [[inv]]…[[/inv]]. That is how most TUIs — " +
+              "fzf, gum, menus, htop — show which row is selected, and plain text loses it.",
+          ),
       },
     },
-    async ({ session, tail, scrollback }) => {
+    async ({ session, tail, scrollback, attrs }) => {
       const s = manager.get(session);
-      const body = scrollback ? await s.scrollback(scrollback) : await s.screen(tail);
+      const body = scrollback ? await s.scrollback(scrollback, attrs) : await s.screen(tail, attrs);
       const header = s.alive
         ? s.alternateScreen
           ? `[${s.id}: full-screen app active]`

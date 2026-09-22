@@ -1,4 +1,4 @@
-import headless from "@xterm/headless";
+import headless, { type IBufferLine } from "@xterm/headless";
 import pty from "node-pty";
 import { ensurePtyExecutable } from "./pty-permissions.js";
 import { Recorder, defaultCastPath, type RecordingResult } from "./recording.js";
@@ -30,6 +30,32 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * A buffer line as text. With `attrs`, runs of reverse-video cells are wrapped in
+ * `[[inv]]…[[/inv]]`: most TUIs mark the selected or focused row with an attribute and no
+ * glyph, so plain text renders every row identically and the selection is invisible.
+ */
+function renderLine(line: IBufferLine | undefined, attrs: boolean): string {
+  if (!line) return "";
+  if (!attrs) return line.translateToString(true);
+  let out = "";
+  let inv = false;
+  for (let x = 0; x < line.length; x++) {
+    const cell = line.getCell(x);
+    // Width 0 is the trailing half of a wide character; its glyph came with the first half.
+    if (!cell || cell.getWidth() === 0) continue;
+    const on = cell.isInverse() !== 0;
+    if (on !== inv) {
+      out += on ? "[[inv]]" : "[[/inv]]";
+      inv = on;
+    }
+    out += cell.getChars() || " ";
+  }
+  if (inv) out += "[[/inv]]";
+  // Trailing blanks only outside a highlight — a row painted inverse to the edge is real.
+  return out.replace(/ +$/, "");
+}
+
 export class Session {
   readonly id: string;
   readonly command: string;
@@ -43,6 +69,12 @@ export class Session {
   private replay: string[] = [];
   private replayBytes = 0;
   private recorder: Recorder | null = null;
+  /**
+   * The last finalized recording. A program that exits on its own ends its own recording
+   * (see onExit), so by the time stop_recording is called there is no recorder left — but
+   * the .cast on disk is complete and still worth rendering.
+   */
+  private lastRecording: RecordingResult | null = null;
   /** Set when the emulator refuses or fails to apply output — see flush(). */
   private emulatorError: string | null = null;
 
@@ -192,6 +224,7 @@ export class Session {
   /** Start capturing output to an asciicast file. */
   startRecording(castPath?: string): string {
     if (this.recorder) throw new Error(`Session ${this.id} is already recording to ${this.recorder.castPath}`);
+    this.lastRecording = null;
     this.recorder = new Recorder(
       castPath ?? defaultCastPath(this.id),
       { cols: this.cols, rows: this.rows, command: [this.command, ...this.args].join(" ") },
@@ -200,12 +233,16 @@ export class Session {
     return this.recorder.castPath;
   }
 
-  /** Finalize the recording. Returns null if this session was not recording. */
+  /**
+   * Finalize the recording, or hand back the one that already finalized itself when the
+   * process exited. Returns null only if this session never started a recording.
+   */
   async stopRecording(): Promise<RecordingResult | null> {
     const recorder = this.recorder;
-    if (!recorder) return null;
+    if (!recorder) return this.lastRecording;
     this.recorder = null;
-    return recorder.stop();
+    this.lastRecording = await recorder.stop();
+    return this.lastRecording;
   }
 
   onData(listener: (chunk: string) => void) {
@@ -251,26 +288,26 @@ export class Session {
   }
 
   /** The visible screen as plain text, trailing blank lines trimmed. */
-  async screen(tail?: number): Promise<string> {
+  async screen(tail?: number, attrs = false): Promise<string> {
     await this.flush();
     const buf = this.term.buffer.active;
     const lines: string[] = [];
     for (let y = 0; y < this.term.rows; y++) {
-      lines.push(buf.getLine(buf.viewportY + y)?.translateToString(true) ?? "");
+      lines.push(renderLine(buf.getLine(buf.viewportY + y), attrs));
     }
     while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
     return (tail ? lines.slice(-tail) : lines).join("\n");
   }
 
   /** The last `count` logical lines of scrollback + screen, unwrapping soft-wrapped rows. */
-  async scrollback(count: number): Promise<string> {
+  async scrollback(count: number, attrs = false): Promise<string> {
     await this.flush();
     const buf = this.term.buffer.active;
     const logical: string[] = [];
     for (let y = 0; y < buf.length; y++) {
       const line = buf.getLine(y);
       if (!line) continue;
-      const text = line.translateToString(true);
+      const text = renderLine(line, attrs);
       if (line.isWrapped && logical.length) logical[logical.length - 1] += text;
       else logical.push(text);
     }
