@@ -189,3 +189,16 @@ test("a wedged emulator reports the screen as stale instead of hanging", async (
   assert.match(String(s.staleReason), /frozen/, "the freeze must be reported, not hidden");
   await mgr.remove(s.id);
 });
+
+test("attrs marks the reverse-video row a TUI uses for its selection", async () => {
+  const s = mgr.create({
+    command: "/bin/bash",
+    args: ["--norc", "--noprofile", "-c", String.raw`printf 'plain-row\n\033[7mselected-row\033[0m\n'; sleep 5`],
+  });
+  await s.waitIdle(300, 5000);
+  assert.match(await s.screen(undefined, true), /\[\[inv\]\]selected-row\[\[\/inv\]\]/);
+  assert.doesNotMatch(await s.screen(undefined, true), /\[\[inv\]\]plain-row/);
+  // Default output stays exactly as it was.
+  assert.doesNotMatch(await s.screen(), /\[\[inv\]\]/);
+  await mgr.remove(s.id);
+});

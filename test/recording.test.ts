@@ -109,3 +109,25 @@ test("exportRecording names the field it wanted instead of crashing on undefined
     /castPath/,
   );
 });
+
+test("a recording survives the process exiting on its own", async () => {
+  const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile", "-c", "echo bye-now"] });
+  const castPath = s.startRecording(path.join(tmp, "self-exit.cast"));
+  const w = await s.waitIdle(300, 5000);
+  assert.equal(w.reason, "exited");
+
+  // onExit already finalized it; stop_recording still has to hand back something renderable.
+  const result = await s.stopRecording();
+  assert.ok(result, "stopRecording should return the auto-finalized recording");
+  assert.equal(result.castPath, castPath);
+  assert.match(readCast(castPath).events.map((e) => e[2]).join(""), /bye-now/);
+
+  await mgr.remove(s.id);
+});
+
+test("stop_recording still reports nothing when the session never recorded", async () => {
+  const s = mgr.create({ command: "/bin/bash", args: ["--norc", "--noprofile", "-c", "true"] });
+  await s.waitIdle(300, 5000);
+  assert.equal(await s.stopRecording(), null);
+  await mgr.remove(s.id);
+});
