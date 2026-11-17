@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
-import type { WaitResult } from "./session.js";
+import { compilePattern, type WaitResult } from "./session.js";
 
 export interface BrowserOptions {
   url?: string;
@@ -48,6 +48,50 @@ export interface TabInfo {
 /** Refs the accessibility snapshot hands out: `e12`, or `f2e7` inside an iframe. */
 const REF = /^(f\d+)?e\d+$/;
 
+/**
+ * How long an action waits for its element. Playwright's 30s default is a human's patience:
+ * a ref from an old snapshot, a disabled button or a covered element never comes good, and
+ * the agent loses half a minute learning that. Refs resolve immediately or not at all.
+ */
+const ACTION_TIMEOUT_MS = 5000;
+const REF_TIMEOUT_MS = 2000;
+
+/**
+ * A Playwright error, cut down to what an agent can act on. The raw message carries ANSI
+ * colour codes and a call log several times longer than the cause, and the cause — stale ref,
+ * two matches, disabled, covered — is in that log rather than the headline.
+ */
+export function explainActionError(err: unknown, target: string | undefined): Error {
+  const raw = (err instanceof Error ? err.message : String(err)).replace(/\x1b\[[0-9;]*m/g, "");
+  const isRef = !!target && REF.test(target);
+  const log = raw.split("\n").map((l) => l.trim());
+
+  if (/strict mode violation/.test(raw)) {
+    const matches = log.filter((l) => /^\d+\) /.test(l)).map((l) => {
+      const aka = /aka (.*)$/.exec(l)?.[1];
+      return `  ${l.slice(0, l.indexOf(")") + 1)} ${aka ?? l.slice(0, 160)}`;
+    });
+    return new Error(
+      `"${target}" matches ${matches.length || "several"} elements, so nothing was done:\n${matches.join("\n")}\n` +
+        "Use the [ref=…] of the one you mean from the snapshot below, or a narrower selector.",
+    );
+  }
+  if (isRef && (/Invalid frame in aria-ref|Timeout .*exceeded/.test(raw)) && !/locator resolved to/.test(raw)) {
+    return new Error(`ref ${target} is not on the page any more — the page changed since that snapshot. Use a ref from the snapshot below.`);
+  }
+  if (/Timeout .*exceeded/.test(raw)) {
+    const why = log.find((l) => /intercepts pointer events/.test(l));
+    if (why) return new Error(`"${target}" is covered by another element, so the click would land on it instead: ${why.slice(0, 240)}. Close what is on top (often a dialog or overlay) first.`);
+    if (log.some((l) => /element is not enabled|not editable/.test(l)) || /<[^>]+\bdisabled\b/.test(raw)) {
+      return new Error(`"${target}" is disabled. Something on the page has to be done first to enable it.`);
+    }
+    if (log.some((l) => /element is not visible/.test(l))) return new Error(`"${target}" is on the page but not visible — scroll to it or open what contains it.`);
+    if (!/locator resolved to/.test(raw)) return new Error(`nothing matches "${target}" on the page. Use a ref from the snapshot below.`);
+  }
+  const headline = log[0] ?? raw;
+  return new Error(headline.length > 400 ? `${headline.slice(0, 400)}…` : headline);
+}
+
 /** Characters of tree a snapshot returns before it is cut, roughly 4k tokens. */
 const SNAPSHOT_LIMIT = 16_000;
 
@@ -78,6 +122,8 @@ export class BrowserSession {
 
   alive = true;
   recording: string | null = null;
+  /** The named profile this session holds, if any — Chrome allows one window per profile. */
+  profile: string | undefined;
 
   private browser: Browser | null = null;
   private context: BrowserContext;
@@ -179,7 +225,17 @@ export class BrowserSession {
       if (opts.profile) {
         const dir = path.join(os.homedir(), ".termmirror", "profiles", opts.profile);
         mkdirSync(dir, { recursive: true });
-        context = await chromium.launchPersistentContext(dir, { ...launch, viewport, acceptDownloads: true });
+        try {
+          context = await chromium.launchPersistentContext(dir, { ...launch, viewport, acceptDownloads: true });
+        } catch (err) {
+          if (/existing browser session|profile is already in use|ProcessSingleton/i.test(String(err))) {
+            throw new Error(
+              `Profile "${opts.profile}" is locked by another Chrome — usually a window left from an earlier ` +
+                `termmirror run. Close that Chrome window (or quit the process holding ${dir}), or use a different profile.`,
+            );
+          }
+          throw err;
+        }
       } else {
         browser = await chromium.launch(launch);
         context = await browser.newContext({ viewport, acceptDownloads: true });
@@ -195,9 +251,13 @@ export class BrowserSession {
       throw err;
     }
 
+    context.setDefaultTimeout(ACTION_TIMEOUT_MS);
+    // Navigation keeps the long default: a slow page is worth waiting for, a missing element is not.
+    context.setDefaultNavigationTimeout(30_000);
     const page = context.pages()[0] ?? (await context.newPage());
     await page.setViewportSize(viewport).catch(() => {});
     const session = new BrowserSession(id, context, page, browser, width, height);
+    session.profile = opts.profile;
 
     session.attach(page);
     // A click with target="_blank", a sign-in popup, a tab the human opened: the new page
@@ -264,7 +324,16 @@ export class BrowserSession {
 
   async navigate(url: string) {
     const full = /^[a-z]+:\/\//i.test(url) || url.startsWith("about:") || url.startsWith("data:") ? url : `https://${url}`;
-    await this.page.goto(full, { waitUntil: "domcontentloaded" });
+    try {
+      await this.page.goto(full, { waitUntil: "domcontentloaded" });
+    } catch (err) {
+      // A crashed renderer stays crashed: every later goto on that page fails the same way.
+      // A fresh tab in the same context keeps the cookies and gets the agent going again.
+      if (!/Page crashed|Target crashed/i.test(String(err))) throw err;
+      const dead = this.page;
+      await this.newTab(full);
+      await dead.close().catch(() => {});
+    }
   }
 
   /**
@@ -322,6 +391,10 @@ export class BrowserSession {
     return REF.test(target) ? this.page.locator(`aria-ref=${target}`) : this.page.locator(target);
   }
 
+  private timeoutFor(target: string | undefined) {
+    return target && REF.test(target) ? REF_TIMEOUT_MS : ACTION_TIMEOUT_MS;
+  }
+
   async act(a: Action): Promise<void> {
     const need = (what: string) => {
       if (!a.target) throw new Error(`act kind "${a.kind}" needs a target (a ref like "e12" or a CSS selector) to ${what}.`);
@@ -333,6 +406,8 @@ export class BrowserSession {
     this.dialogText = a.dialogText;
     try {
       await this.perform(a, need);
+    } catch (err) {
+      throw explainActionError(err, a.target);
     } finally {
       this.dialogAction = "dismiss";
       this.dialogText = undefined;
@@ -342,7 +417,7 @@ export class BrowserSession {
   private async perform(a: Action, need: (what: string) => ReturnType<BrowserSession["locator"]>): Promise<void> {
     switch (a.kind) {
       case "click":
-        await need("click").click();
+        await need("click").click({ timeout: this.timeoutFor(a.target) });
         break;
       case "type": {
         const el = need("type into");
@@ -361,7 +436,7 @@ export class BrowserSession {
         break;
       case "select":
         if (a.text === undefined) throw new Error('act kind "select" needs `text`: the option to choose.');
-        await need("select in").selectOption(a.text);
+        await this.select(need("select in"), a.text);
         break;
       case "scroll":
         if (a.target) await this.locator(a.target).scrollIntoViewIfNeeded();
@@ -379,6 +454,28 @@ export class BrowserSession {
     }
   }
 
+  /**
+   * Choose an option. Most dropdowns on the modern web are a button that opens a listbox, not
+   * a <select>, and selectOption refuses those outright; open it and click the option instead.
+   */
+  private async select(el: ReturnType<BrowserSession["locator"]>, option: string) {
+    const native = await el.evaluate((n) => n.tagName === "SELECT", undefined, { timeout: ACTION_TIMEOUT_MS });
+    if (native) {
+      await el.selectOption(option);
+      return;
+    }
+    await el.click();
+    const choice = this.page.getByRole("option", { name: option, exact: true })
+      .or(this.page.getByRole("menuitem", { name: option, exact: true }))
+      .or(this.page.getByRole("option", { name: option }))
+      .first();
+    try {
+      await choice.click({ timeout: ACTION_TIMEOUT_MS });
+    } catch {
+      throw new Error(`opened the dropdown but found no option "${option}" in it. Its options are in the snapshot below.`);
+    }
+  }
+
   async waitIdle(timeoutMs: number): Promise<WaitResult> {
     try {
       await this.page.waitForLoadState("networkidle", { timeout: timeoutMs });
@@ -390,10 +487,11 @@ export class BrowserSession {
   }
 
   async waitPattern(pattern: string, timeoutMs: number, ignoreCase = false): Promise<WaitResult> {
+    const re = compilePattern(pattern, ignoreCase);
     try {
       await this.page.waitForFunction(
         ([src, flags]) => new RegExp(src, flags).test(document.body?.innerText ?? ""),
-        [pattern, ignoreCase ? "i" : ""],
+        [re.source, re.flags],
         { timeout: timeoutMs },
       );
       return { ok: true, reason: "pattern", match: pattern };

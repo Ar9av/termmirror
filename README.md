@@ -81,15 +81,15 @@ Any MCP client works; the server speaks stdio.
 
 ## Usage
 
-Three tools, used in this order:
+Two tools, used in this order:
 
 ```
-send_input  →  wait  →  read_screen
+send_input  →  wait
 ```
 
-`read_screen` returns the screen as it looks now — a screenshot, not a log of everything
-printed. `wait` is what makes that screenshot worth reading: it blocks until the program has
-responded and gone quiet, so you see the state *after* your keystroke.
+`wait` blocks until the program has responded and gone quiet, then returns the screen as it
+looks now — a screenshot, not a log of everything printed — so you see the state *after* your
+keystroke. `read_screen` reads it again, or reaches back into scrollback.
 
 ### Tools
 
@@ -99,7 +99,7 @@ responded and gone quiet, so you see the state *after* your keystroke.
 | `send_input` | Types text into a session, optionally submitting it with Enter. |
 | `send_keys` | Sends `ctrl+c`, `escape`, `tab`, arrow keys, `f1`–`f12`, `alt+X`, and similar. |
 | `read_screen` | Returns the visible screen as plain text; `scrollback` reaches into history, `attrs` marks highlighted (reverse-video) text so a TUI's selected row is visible. |
-| `wait` | Waits for the session to respond and settle (`idle`), or for text to appear (`pattern`). |
+| `wait` | Waits for the session to respond and settle (`idle`), or for text to appear (`pattern`), and returns the screen. |
 | `list_sessions` | Lists all sessions, alive or exited, with watch URLs. |
 | `resize` | Changes the terminal dimensions. |
 | `start_recording` | Begins capturing the session's output in the background. |
@@ -117,14 +117,20 @@ responded and gone quiet, so you see the state *after* your keystroke.
 `idle` is the default and the right choice in most cases. Interactive programs redraw
 continuously while they work and fall silent when it is your turn, so silence is a reliable
 completion signal — including for spinners and TUIs that expose no prompt to match against.
-Increase `timeout` for slow operations.
+Increase `timeout` for slow operations. One call returns after at most 110 seconds — MCP
+clients abandon a tool call at around two minutes — so for longer work, wait again.
 
 A `no_output` result means nothing came back since your input: the program is either busy and
 silent, or the input never registered.
 
 Use `pattern` when the expected text is known. It matches against the whole screen, including
 your own echoed input, so wait for something the *program* prints rather than a marker you
-just typed.
+just typed. Patterns are JavaScript regexes; a leading `(?i)` or `(?s)` is accepted and
+turned into the matching flag.
+
+`send_input` with `enter` types the text, lets it echo, and then presses Enter as a separate
+keystroke. Sent together, TUIs such as Claude Code read the pair as a paste and leave the
+prompt sitting unsubmitted.
 
 ## Watching a session
 

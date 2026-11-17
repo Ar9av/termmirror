@@ -319,3 +319,33 @@ test("the manager keeps the two kinds of session apart", async (t) => {
   await mgr.remove(term.id);
   assert.equal(mgr.list().length, 0);
 });
+
+const MESSY =
+  "data:text/html," +
+  encodeURIComponent(
+    `<button>Save</button><button>Save</button>
+     <button disabled>Publish</button>
+     <button aria-haspopup="listbox" onclick="document.getElementById('lb').hidden=false">Time window</button>
+     <ul role="listbox" id="lb" hidden><li role="option" onclick="document.getElementById('picked').textContent='picked '+this.textContent">Last 7 days</li></ul>
+     <p id="picked"></p>`,
+  );
+
+test("a failed action fails fast and says why in words an agent can act on", async (t) => {
+  if (!haveChrome) return t.skip("Chrome not installed");
+  const b = await mgr.createBrowser({ headless: true, url: MESSY, width: 600, height: 400 });
+
+  const started = Date.now();
+  await assert.rejects(() => b.act({ kind: "click", target: "button:has-text('Save')" }), (err: Error) => {
+    assert.match(err.message, /matches 2 elements/);
+    assert.doesNotMatch(err.message, /\x1b\[/, "no terminal colour codes");
+    return true;
+  });
+  await assert.rejects(() => b.act({ kind: "click", target: "button:text-is('Publish')" }), /disabled/);
+  await assert.rejects(() => b.act({ kind: "click", target: "e9999" }), /not on the page any more/);
+  assert.ok(Date.now() - started < 15000, "should not sit on Playwright's 30s default");
+
+  // A button-and-listbox dropdown is not a <select>, and is the common kind.
+  await b.act({ kind: "select", target: "button:text-is('Time window')", text: "Last 7 days" });
+  assert.equal((await b.waitPattern("picked Last 7 days", 3000)).ok, true);
+  await mgr.remove(b.id);
+});

@@ -9,9 +9,31 @@ import { startWebUI, type WebUI } from "./web.js";
 
 const DEFAULT_IDLE_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Longest a single wait may block. MCP clients give up on a tool call after about two minutes
+ * (Claude Code backgrounds it at 120s), and a wait that outlives the call returns into the
+ * void. Better to come back just short of that and let the agent wait again.
+ */
+const MAX_WAIT_MS = 110_000;
+
+function clampWait(timeout: number | undefined) {
+  const asked = timeout ?? DEFAULT_TIMEOUT_MS;
+  return { ms: Math.min(asked, MAX_WAIT_MS), clamped: asked > MAX_WAIT_MS };
+}
 
 // Read rather than duplicated, so the version a client sees cannot drift from the package.
 const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
+
+function screenHeader(s: Session) {
+  const header = s.alive
+    ? s.alternateScreen
+      ? `[${s.id}: full-screen app active]`
+      : `[${s.id}]`
+    : `[${s.id}: exited with code ${s.exitCode}]`;
+  // A frozen screen otherwise reads as a real one: everything still says alive, and
+  // the agent keeps acting on a snapshot that stopped updating. Say it out loud.
+  return s.staleReason ? `${header}\n[${s.id}: STALE — ${s.staleReason}]` : header;
+}
 
 function text(value: unknown) {
   return {
@@ -25,8 +47,8 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
     {
       instructions:
         "Real interactive terminal sessions. The loop is always: send_input (or send_keys) -> " +
-        "wait -> read_screen. read_screen returns a screenshot of the visible screen, not a log, " +
-        "so read it after every wait. Use this for anything that blocks or prompts: another agent " +
+        "wait. wait returns the visible screen once the program has settled — a screenshot, not a " +
+        "log, so look at it after every wait; read_screen reads it again or reaches into scrollback. Use this for anything that blocks or prompts: another agent " +
         "CLI (claude, codex), REPLs, debuggers, ssh, installers, vim. A human can watch any session " +
         "live in the browser at the URL create_session returns, and type into it alongside you. " +
         "start_recording captures everything a session prints from then on, in the background, and " +
@@ -73,7 +95,7 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       return text({
         ...session.info(),
         watchUrl: web ? web.sessionUrl(session.id) : webError,
-        next: "Call wait, then read_screen to see the initial screen.",
+        next: "Call wait to see the initial screen.",
       });
     },
   );
@@ -85,7 +107,7 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       description:
         "Type text into the session, as a person would. It waits for the screen to stop redrawing " +
         "before typing, because keys that land mid-redraw are silently lost. Set `enter` to submit. " +
-        "Follow with wait, then read_screen — the input alone tells you nothing about what happened.",
+        "Follow with wait, which returns the screen — the input alone tells you nothing about what happened.",
       inputSchema: {
         session: z.string().describe("Session id from create_session."),
         text: z.string().describe("Literal text to type."),
@@ -147,17 +169,11 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
       },
     },
     async ({ session, tail, scrollback, attrs }) => {
+      // Pointed at a browser, the equivalent of the screen is the page.
+      if (manager.isBrowser(session)) return text(await manager.getBrowser(session).snapshot());
       const s = manager.get(session);
       const body = scrollback ? await s.scrollback(scrollback, attrs) : await s.screen(tail, attrs);
-      const header = s.alive
-        ? s.alternateScreen
-          ? `[${s.id}: full-screen app active]`
-          : `[${s.id}]`
-        : `[${s.id}: exited with code ${s.exitCode}]`;
-      // A frozen screen otherwise reads as a real one: everything still says alive, and
-      // the agent keeps acting on a snapshot that stopped updating. Say it out loud.
-      const stale = s.staleReason ? `\n[${s.id}: STALE — ${s.staleReason}]` : "";
-      return text(`${header}${stale}\n${body}`);
+      return text(`${screenHeader(s)}\n${body}`);
     },
   );
 
@@ -173,24 +189,41 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
         "silent when it is your turn. A `no_output` result means nothing happened at all: the program " +
         "is silently busy, or your input did not register. Use mode `pattern` when you know the exact " +
         "text to expect; it matches the whole screen, including your own echoed input, so never wait " +
-        "for a marker you just typed. Raise `timeout` for slow work.",
+        "for a marker you just typed. Raise `timeout` for slow work; a single wait returns after " +
+        `at most ${MAX_WAIT_MS / 1000}s, so for longer work just wait again. The screen comes back ` +
+        "with the result, so you rarely need a separate read_screen — pass `screen: false` to skip it.",
       inputSchema: {
         session: z.string().describe("Session id."),
         mode: z.enum(["idle", "pattern"]).optional().describe("Default 'idle'."),
         pattern: z.string().optional().describe("Regex to match, required for mode 'pattern'."),
         ignore_case: z.boolean().optional().describe("Case-insensitive pattern match."),
         idle_ms: z.number().int().min(100).optional().describe(`Quiet period for idle mode (default ${DEFAULT_IDLE_MS}).`),
-        timeout: z.number().int().min(100).optional().describe(`Give up after this many ms (default ${DEFAULT_TIMEOUT_MS}).`),
+        timeout: z
+          .number()
+          .int()
+          .min(100)
+          .optional()
+          .describe(`Give up after this many ms (default ${DEFAULT_TIMEOUT_MS}, at most ${MAX_WAIT_MS}).`),
+        screen: z.boolean().optional().describe("Include the screen in the result (default true)."),
+        tail: z.number().int().min(1).optional().describe("With the screen, only its last N rows."),
       },
     },
-    async ({ session, mode, pattern, ignore_case, idle_ms, timeout }) => {
+    async ({ session, mode, pattern, ignore_case, idle_ms, timeout, screen, tail }) => {
       const s = manager.get(session);
-      const timeoutMs = timeout ?? DEFAULT_TIMEOUT_MS;
+      const { ms, clamped } = clampWait(timeout);
+      let result;
       if ((mode ?? "idle") === "pattern") {
         if (!pattern) throw new Error("mode 'pattern' requires `pattern`.");
-        return text(await s.waitPattern(pattern, timeoutMs, ignore_case));
+        result = await s.waitPattern(pattern, ms, ignore_case);
+      } else {
+        result = await s.waitIdle(idle_ms ?? DEFAULT_IDLE_MS, ms);
       }
-      return text(await s.waitIdle(idle_ms ?? DEFAULT_IDLE_MS, timeoutMs));
+      if (clamped && result.reason === "timeout") {
+        result = { ...result, note: `${result.note ? result.note + " " : ""}Capped at ${MAX_WAIT_MS / 1000}s per call — call wait again to keep waiting.` };
+      }
+      const content = [{ type: "text" as const, text: JSON.stringify(result, null, 2) }];
+      if (screen !== false) content.push({ type: "text" as const, text: `${screenHeader(s)}\n${await s.screen(tail)}` });
+      return { content };
     },
   );
 
@@ -446,7 +479,17 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
     },
     async ({ session, kind, target, text: value, key, amount, enter, files, dialog, dialog_text, settle_ms }) => {
       const b = manager.getBrowser(session);
-      await b.act({ kind, target, text: value, key, amount, enter, files, dialog, dialogText: dialog_text });
+      try {
+        await b.act({ kind, target, text: value, key, amount, enter, files, dialog, dialogText: dialog_text });
+      } catch (err) {
+        // Almost every failed action is answered by looking at the page as it is now, so hand
+        // that back with the error instead of making the agent spend a call asking for it.
+        const page = await b.snapshot().catch(() => "");
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `${err instanceof Error ? err.message : String(err)}\n\n${page}` }],
+        };
+      }
       // A click that starts a navigation or a transition leaves the tree mid-change; a short
       // pause makes the snapshot describe the page the action produced.
       await new Promise((r) => setTimeout(r, settle_ms ?? 250));
@@ -509,7 +552,7 @@ export function createServer(manager: SessionManager, opts: { port?: number; noW
     },
     async ({ session, mode, pattern, ignore_case, timeout }) => {
       const b = manager.getBrowser(session);
-      const timeoutMs = timeout ?? DEFAULT_TIMEOUT_MS;
+      const timeoutMs = clampWait(timeout).ms;
       if ((mode ?? "idle") === "pattern") {
         if (!pattern) throw new Error("mode 'pattern' requires `pattern`.");
         return text(await b.waitPattern(pattern, timeoutMs, ignore_case));

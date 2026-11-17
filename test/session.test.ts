@@ -202,3 +202,28 @@ test("attrs marks the reverse-video row a TUI uses for its selection", async () 
   assert.doesNotMatch(await s.screen(), /\[\[inv\]\]/);
   await mgr.remove(s.id);
 });
+
+test("enter lands as its own keystroke, so a TUI reads it as submit rather than a pasted newline", async () => {
+  // Claude Code and friends treat text+CR arriving in one chunk as a paste. This reader
+  // reports exactly that distinction.
+  const reader =
+    "process.stdin.setRawMode(true);process.stdin.on('data',d=>{const s=d.toString();" +
+    "if(s==='\\r')process.stdout.write('\\r\\nSUBMIT\\r\\n');else if(s.includes('\\r'))process.stdout.write('\\r\\nPASTE\\r\\n');" +
+    "else process.stdout.write(s)})";
+  const s = mgr.create({ command: process.execPath, args: ["-e", reader] });
+  await s.waitIdle(300, 3000);
+  await s.type("hello there", true);
+  await s.waitPattern("SUBMIT|PASTE", 5000);
+  const screen = await s.screen();
+  assert.match(screen, /SUBMIT/);
+  assert.doesNotMatch(screen, /PASTE/);
+  await mgr.remove(s.id);
+});
+
+test("wait patterns accept a leading inline flag like (?i), and say so when invalid", async () => {
+  const { compilePattern } = await import("../src/session.js");
+  const re = compilePattern("(?i)done");
+  assert.ok(re.test("DONE"));
+  assert.ok(compilePattern("(?s)a.b").test("a\nb"));
+  assert.throws(() => compilePattern("(unclosed"), /Invalid pattern.*JavaScript/);
+});

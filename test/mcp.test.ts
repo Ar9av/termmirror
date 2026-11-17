@@ -90,8 +90,11 @@ test("drives a session end to end over the MCP protocol", async () => {
   // ctrl+c must reach the program: interrupt a sleep and get the prompt back.
   await client.callTool({ name: "send_input", arguments: { session, text: "sleep 30", enter: true } });
   await client.callTool({ name: "send_keys", arguments: { session, keys: ["ctrl+c"] } });
-  const after = await client.callTool({ name: "wait", arguments: { session, idle_ms: 300, timeout: 5000 } });
-  assert.equal(JSON.parse(textOf(after)).ok, true, "session should go quiet after the interrupt");
+  const after: any = await client.callTool({ name: "wait", arguments: { session, idle_ms: 300, timeout: 5000 } });
+  assert.equal(JSON.parse(after.content[0].text).ok, true, "session should go quiet after the interrupt");
+  // The screen rides along with the wait, so the agent does not need a second call to see it.
+  assert.match(after.content[1].text, /^\[term-1\]/);
+  assert.match(after.content[1].text, /sleep 30/);
 
   // Recording round trip: cast format needs no external renderer, so it works everywhere.
   const castPath = path.join(os.tmpdir(), `termmirror-mcp-${process.pid}.cast`);

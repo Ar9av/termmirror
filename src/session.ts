@@ -26,6 +26,25 @@ export interface WaitResult {
 
 const REPLAY_LIMIT = 256 * 1024;
 
+/**
+ * A wait pattern as a JS RegExp. Agents write PCRE/Python habits like a leading `(?i)`, which
+ * JS rejects as an invalid group; lift those inline flags into real ones instead of failing.
+ */
+export function compilePattern(pattern: string, ignoreCase = false): RegExp {
+  let src = pattern;
+  const flags = new Set(ignoreCase ? ["i"] : []);
+  const inline = /^\(\?([imsx]+)\)/.exec(src);
+  if (inline) {
+    src = src.slice(inline[0].length);
+    for (const f of inline[1]) if (f !== "x") flags.add(f);
+  }
+  try {
+    return new RegExp(src, [...flags].join(""));
+  } catch (err) {
+    throw new Error(`Invalid pattern ${JSON.stringify(pattern)}: ${(err as Error).message}. Patterns are JavaScript regexes.`);
+  }
+}
+
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -208,7 +227,19 @@ export class Session {
    */
   async type(text: string, enter = false, quietMs = 200) {
     await this.settle(quietMs);
-    this.write(enter ? `${text}\r` : text);
+    if (!enter || text === "") {
+      this.write(enter ? "\r" : text);
+      return;
+    }
+    // Text and Enter in one write arrive as one chunk, which TUIs like Claude Code read as a
+    // paste and turn the Enter into a newline in the input box — the prompt sits there
+    // unsubmitted. Let the echo land first, then press Enter on its own.
+    this.write(text);
+    const before = this.outputCount;
+    const deadline = Date.now() + 1000;
+    while (this.alive && this.outputCount === before && Date.now() < deadline) await sleep(20);
+    await this.settle(80, 1000);
+    this.write("\r");
   }
 
   resize(cols: number, rows: number) {
@@ -345,7 +376,7 @@ export class Session {
 
   /** Resolve once `pattern` matches the visible screen. */
   async waitPattern(pattern: string, timeoutMs: number, ignoreCase = false): Promise<WaitResult> {
-    const re = new RegExp(pattern, ignoreCase ? "i" : undefined);
+    const re = compilePattern(pattern, ignoreCase);
     const deadline = Date.now() + timeoutMs;
     while (true) {
       const m = re.exec(await this.screen());
@@ -398,7 +429,16 @@ export class SessionManager {
     return session;
   }
 
+  isBrowser(id: string) {
+    return this.browsers.has(id);
+  }
+
   async createBrowser(opts: BrowserOptions = {}): Promise<BrowserSession> {
+    // Chrome's own error for a locked profile reads as a crash; say who holds it.
+    const holder = opts.profile && [...this.browsers.values()].find((b) => b.alive && b.profile === opts.profile);
+    if (holder) {
+      throw new Error(`Profile "${opts.profile}" is already open in ${holder.id} — keep using that session, or kill_session it first.`);
+    }
     const id = `web-${++this.browserCounter}`;
     // Loaded on demand: playwright is a large module and most sessions are terminals.
     const { BrowserSession } = await import("./browser.js");
