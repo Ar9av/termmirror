@@ -92,6 +92,20 @@ export function explainActionError(err: unknown, target: string | undefined): Er
   return new Error(headline.length > 400 ? `${headline.slice(0, 400)}…` : headline);
 }
 
+/** A failed goto, without the call log, and with the likely cause for the common network errors. */
+export function explainNavigationError(err: unknown, url: string): Error {
+  const raw = (err instanceof Error ? err.message : String(err)).replace(/\x1b\[[0-9;]*m/g, "");
+  const code = /net::(ERR_[A-Z_]+)/.exec(raw)?.[1];
+  const hint: Record<string, string> = {
+    ERR_CONNECTION_REFUSED: "nothing is listening there — is the server running, and on that port?",
+    ERR_NAME_NOT_RESOLVED: "that host name does not resolve — check the spelling.",
+    ERR_INTERNET_DISCONNECTED: "this machine is offline.",
+    ERR_CERT_AUTHORITY_INVALID: "the site's certificate is not trusted (self-signed?).",
+  };
+  if (code) return new Error(`could not load ${url}: ${code}${hint[code] ? ` — ${hint[code]}` : ""}`);
+  return new Error(raw.split("\n")[0]);
+}
+
 /** Characters of tree a snapshot returns before it is cut, roughly 4k tokens. */
 const SNAPSHOT_LIMIT = 16_000;
 
@@ -329,7 +343,7 @@ export class BrowserSession {
     } catch (err) {
       // A crashed renderer stays crashed: every later goto on that page fails the same way.
       // A fresh tab in the same context keeps the cookies and gets the agent going again.
-      if (!/Page crashed|Target crashed/i.test(String(err))) throw err;
+      if (!/Page crashed|Target crashed/i.test(String(err))) throw explainNavigationError(err, full);
       const dead = this.page;
       await this.newTab(full);
       await dead.close().catch(() => {});

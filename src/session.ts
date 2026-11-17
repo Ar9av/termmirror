@@ -254,7 +254,12 @@ export class Session {
 
   /** Start capturing output to an asciicast file. */
   startRecording(castPath?: string): string {
-    if (this.recorder) throw new Error(`Session ${this.id} is already recording to ${this.recorder.castPath}`);
+    if (this.recorder) {
+      throw new Error(
+        `Session ${this.id} is already recording to ${this.recorder.castPath}. Call stop_recording first to finish ` +
+          "that one, then start the next.",
+      );
+    }
     this.lastRecording = null;
     this.recorder = new Recorder(
       castPath ?? defaultCastPath(this.id),

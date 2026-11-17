@@ -349,3 +349,20 @@ test("a failed action fails fast and says why in words an agent can act on", asy
   assert.equal((await b.waitPattern("picked Last 7 days", 3000)).ok, true);
   await mgr.remove(b.id);
 });
+
+test("a page that will not load says why without a call log", async (t) => {
+  if (!haveChrome) return t.skip("Chrome not installed");
+  // A port that was just free: nothing listens on it, and Chrome does not block it as unsafe.
+  const { createServer } = await import("node:net");
+  const srv = createServer().listen(0);
+  await new Promise((r) => srv.once("listening", r));
+  const port = (srv.address() as { port: number }).port;
+  await new Promise((r) => srv.close(r));
+  const b = await mgr.createBrowser({ headless: true, width: 600, height: 400 });
+  await assert.rejects(() => b.navigate(`http://127.0.0.1:${port}/`), (err: Error) => {
+    assert.match(err.message, /ERR_CONNECTION_REFUSED — nothing is listening/);
+    assert.doesNotMatch(err.message, /Call log/);
+    return true;
+  });
+  await mgr.remove(b.id);
+});
